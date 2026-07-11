@@ -10,7 +10,7 @@ use crate::offload::{
 };
 use crate::rules::{self, strip_data_root, Action, Rec, Tier};
 use crate::scan::{disk_stats, start_scan, DiskStats, Node, ScanHandle, ScanState, DATA_ROOT};
-use crate::theme::{self, spaced};
+use crate::theme;
 use crate::treemap;
 use egui::{
     pos2, vec2, Align2, Color32, Context, Frame, Label, Margin, Pos2, Rect, RichText, Rounding,
@@ -881,13 +881,14 @@ impl App {
     }
 
     fn draw_map(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
         let depth = self.crumbs.len();
         let hint = if depth > 0 {
-            Some(("right-click or esc = back".to_string(), theme::FAINT))
+            Some(("right-click or esc = back".to_string(), palette.faint))
         } else {
             None
         };
-        let content = panel_chrome(ui, rect, "TERRAIN MAP", hint);
+        let content = panel_chrome(ui, rect, "Storage map", hint);
 
         // ── clickable breadcrumb trail + UP button ──
         let crumb_rect = Rect::from_min_size(
@@ -907,7 +908,7 @@ impl App {
                         ui.label(
                             RichText::new(label)
                                 .font(theme::mono(10.5))
-                                .color(theme::INK),
+                                .color(palette.ink),
                         );
                         return false;
                     }
@@ -915,21 +916,21 @@ impl App {
                         egui::Button::new(
                             RichText::new(label)
                                 .font(theme::mono(10.5))
-                                .color(theme::AMBER),
+                                .color(palette.accent),
                         )
                         .frame(false),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 };
-                if seg(ui, "DATA", depth == 0) {
+                if seg(ui, "Data", depth == 0) {
                     go_to = Some(0);
                 }
                 for i in 0..depth {
                     ui.label(
                         RichText::new("/")
                             .font(theme::mono(10.5))
-                            .color(theme::FAINT),
+                            .color(palette.faint),
                     );
                     let name = self.crumbs[i].name.clone();
                     if seg(ui, &tail_str(&name, 28), i + 1 == depth) {
@@ -940,13 +941,13 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let up = ui.add(
                             egui::Button::new(
-                                RichText::new("↑ UP")
-                                    .font(theme::display(11.5))
-                                    .color(theme::AMBER),
+                                RichText::new("↑ Up")
+                                    .font(theme::body(11.0))
+                                    .color(palette.accent),
                             )
-                            .fill(theme::amber_dim(16))
-                            .stroke(Stroke::new(1.0, theme::amber_dim(90)))
-                            .rounding(Rounding::same(3.0)),
+                            .fill(palette.accent_dim(16))
+                            .stroke(Stroke::new(1.0, palette.accent_dim(90)))
+                            .rounding(Rounding::same(6.0)),
                         );
                         if up
                             .on_hover_text(
@@ -970,9 +971,9 @@ impl App {
             ui.painter().text(
                 map_rect.center(),
                 Align2::CENTER_CENTER,
-                spaced("NO MAP DATA"),
-                theme::display(15.0),
-                theme::FAINT,
+                "No map data yet",
+                theme::body(13.0),
+                palette.faint,
             );
             return;
         };
@@ -982,16 +983,16 @@ impl App {
         let items = treemap::collect_items(&node);
         if items.is_empty() {
             let msg = if self.scanning() {
-                "CHARTING VOLUME"
+                "Mapping storage…"
             } else {
-                "EMPTY"
+                "Nothing to show"
             };
             ui.painter().text(
                 map_rect.center(),
                 Align2::CENTER_CENTER,
-                spaced(msg),
-                theme::display(15.0),
-                theme::FAINT,
+                msg,
+                theme::body(13.0),
+                palette.faint,
             );
             return;
         }
@@ -1022,12 +1023,12 @@ impl App {
                 .fixed_pos(hover.unwrap_or(map_rect.center()) + vec2(16.0, 18.0))
                 .show(ui.ctx(), |tui| {
                     Frame::none()
-                        .fill(Color32::from_rgb(8, 11, 16))
-                        .stroke(Stroke::new(1.0, theme::amber_dim(90)))
-                        .rounding(Rounding::same(4.0))
-                        .inner_margin(Margin::symmetric(10.0, 7.0))
+                        .fill(palette.surface_raised)
+                        .stroke(Stroke::new(1.0, palette.edge))
+                        .rounding(Rounding::same(8.0))
+                        .inner_margin(Margin::symmetric(11.0, 8.0))
                         .show(tui, |tui| {
-                            tui.label(RichText::new(&it.label).font(theme::body(12.5)).color(theme::INK).strong());
+                            tui.label(RichText::new(&it.label).font(theme::body(12.5)).color(palette.ink).strong());
                             let meta = if it.synthetic {
                                 format!("{} · {} small items aggregated", fmt_bytes(it.bytes), fmt_count(it.files))
                             } else {
@@ -1039,7 +1040,7 @@ impl App {
                                     fmt_count(it.files)
                                 )
                             };
-                            tui.label(RichText::new(meta).font(theme::mono(10.5)).color(theme::DIM));
+                            tui.label(RichText::new(meta).font(theme::mono(10.5)).color(palette.muted));
                             let hint = if it.denied {
                                 "access denied — grant Full Disk Access to see inside"
                             } else if it.is_dir && !it.synthetic {
@@ -1049,7 +1050,7 @@ impl App {
                             } else {
                                 "aggregate of items too small to chart · right-click = back"
                             };
-                            tui.label(RichText::new(hint).font(theme::mono(9.5)).color(theme::FAINT));
+                            tui.label(RichText::new(hint).font(theme::mono(9.5)).color(palette.faint));
                         });
                 });
 
@@ -1090,15 +1091,16 @@ impl App {
     }
 
     fn recs_panel(&mut self, ctx: &Context) {
+        let palette = theme::palette(ctx);
         let meta = if self.recs.is_empty() {
             String::new()
         } else {
             let total: i64 = self.recs.iter().map(|r| r.rec.bytes).sum();
-            format!("{} TARGETS · {}", self.recs.len(), fmt_bytes(total))
+            format!("{} targets · {}", self.recs.len(), fmt_bytes(total))
         };
         egui::SidePanel::right("recs")
-            .exact_width(420.0)
-            .frame(Frame::none().fill(theme::BG).inner_margin(Margin {
+            .exact_width(390.0)
+            .frame(Frame::none().fill(palette.canvas).inner_margin(Margin {
                 left: 0.0,
                 right: 12.0,
                 top: 12.0,
@@ -1106,7 +1108,7 @@ impl App {
             }))
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
-                let content = panel_chrome(ui, rect, "RECLAIM PLAN", Some((meta, theme::FAINT)));
+                let content = panel_chrome(ui, rect, "Reclaimable", Some((meta, palette.faint)));
                 let footer_h = 64.0;
                 let list_rect = Rect::from_min_max(content.min, pos2(content.max.x, content.max.y - footer_h));
                 let footer_rect = Rect::from_min_max(pos2(content.min.x, list_rect.max.y), content.max);
@@ -1118,14 +1120,14 @@ impl App {
                         ui.add_space(40.0);
                         ui.vertical_centered(|ui| {
                             ui.label(
-                                RichText::new(spaced("RECOMMENDATIONS APPEAR AFTER A SCAN"))
-                                    .font(theme::display(12.0))
-                                    .color(theme::FAINT),
+                                RichText::new("Recommendations appear after a scan")
+                                    .font(theme::body(12.0))
+                                    .color(palette.faint),
                             );
                             ui.label(
                                 RichText::new("each one explains what it is, what restoring costs,\nand how it gets removed")
                                     .font(theme::mono(9.5))
-                                    .color(theme::FAINT),
+                                    .color(palette.faint),
                             );
                         });
                         return;
@@ -1143,17 +1145,17 @@ impl App {
                                 continue;
                             }
                             let (label, color) = match tier {
-                                Tier::Safe => ("SAFE — REGENERATES ITSELF", theme::GREEN),
-                                Tier::Caution => ("CAUTION — COSTS A REINSTALL", theme::AMBER),
+                                Tier::Safe => ("Safe · regenerates automatically", palette.safe),
+                                Tier::Caution => ("Review · may require a download", palette.caution),
                             };
                             let total: i64 = group.iter().map(|&i| self.recs[i].rec.bytes).sum();
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
                                 let (dot, _) = ui.allocate_exact_size(vec2(10.0, 14.0), Sense::hover());
                                 ui.painter().circle_filled(dot.center(), 3.5, color);
-                                ui.label(RichText::new(spaced(label)).font(theme::display(11.0)).color(color));
+                                ui.label(RichText::new(label).font(theme::body(10.5)).color(color).strong());
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(RichText::new(fmt_bytes(total)).font(theme::mono(10.5)).color(theme::DIM));
+                                    ui.label(RichText::new(fmt_bytes(total)).font(theme::mono(10.5)).color(palette.muted));
                                 });
                             });
                             ui.add_space(4.0);
@@ -1185,33 +1187,45 @@ impl App {
         idx: usize,
         offload_out: &mut Option<(std::path::PathBuf, i64)>,
     ) -> Option<std::path::PathBuf> {
+        let palette = theme::palette(ui.ctx());
         let mut reveal = None;
         let cleaning = self.cleaning;
         let rec_real = strip_data_root(&self.recs[idx].rec.path);
         let rec_size = self.recs[idx].rec.bytes;
         let row = &mut self.recs[idx];
+        let selected_color = if row.action == Action::Delete {
+            palette.danger
+        } else if row.rec.tier == Tier::Caution {
+            palette.caution
+        } else {
+            palette.safe
+        };
         let (border, fill) = match (&row.status, row.checked) {
-            (RecStatus::Running, _) => (
-                theme::cyan_dim(110),
-                Color32::from_rgba_unmultiplied(98, 217, 240, 8),
-            ),
-            (RecStatus::Failed(_), _) => (theme::red_dim(120), Color32::TRANSPARENT),
+            (RecStatus::Running, _) => (palette.accent_dim(110), palette.accent_dim(10)),
+            (RecStatus::Failed(_), _) => (palette.danger_dim(120), Color32::TRANSPARENT),
             (_, true) => (
-                theme::amber_dim(80),
-                Color32::from_rgba_unmultiplied(255, 178, 77, 9),
+                Color32::from_rgba_unmultiplied(
+                    selected_color.r(),
+                    selected_color.g(),
+                    selected_color.b(),
+                    110,
+                ),
+                Color32::from_rgba_unmultiplied(
+                    selected_color.r(),
+                    selected_color.g(),
+                    selected_color.b(),
+                    10,
+                ),
             ),
-            _ => (
-                theme::edge_soft(),
-                Color32::from_rgba_unmultiplied(255, 255, 255, 3),
-            ),
+            _ => (palette.edge_soft, palette.surface_raised),
         };
         let dimmed = matches!(row.status, RecStatus::Cleared(_) | RecStatus::InTrash(_));
 
         Frame::none()
             .fill(fill)
             .stroke(Stroke::new(1.0, border))
-            .rounding(Rounding::same(5.0))
-            .inner_margin(Margin::symmetric(9.0, 8.0))
+            .rounding(Rounding::same(10.0))
+            .inner_margin(Margin::symmetric(10.0, 9.0))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if dimmed {
@@ -1224,7 +1238,7 @@ impl App {
                             Label::new(
                                 RichText::new(&row.rec.title)
                                     .font(theme::body(13.0))
-                                    .color(theme::INK)
+                                    .color(palette.ink)
                                     .strong(),
                             )
                             .sense(Sense::click())
@@ -1234,7 +1248,7 @@ impl App {
                             Label::new(
                                 RichText::new(&row.rec.display)
                                     .font(theme::mono(9.5))
-                                    .color(theme::FAINT),
+                                    .color(palette.faint),
                             )
                             .truncate(),
                         );
@@ -1246,41 +1260,41 @@ impl App {
                             ui.label(
                                 RichText::new(row.rec.desc)
                                     .font(theme::body(11.0))
-                                    .color(theme::DIM),
+                                    .color(palette.muted),
                             );
                             ui.label(
-                                RichText::new(spaced("TO RESTORE"))
-                                    .font(theme::display(9.0))
-                                    .color(theme::FAINT),
+                                RichText::new("To restore")
+                                    .font(theme::body(9.5))
+                                    .color(palette.faint),
                             );
                             ui.label(
                                 RichText::new(row.rec.restore)
                                     .font(theme::body(11.0))
-                                    .color(theme::DIM),
+                                    .color(palette.muted),
                             );
                             if !row.rec.note.is_empty() {
                                 ui.label(
                                     RichText::new(&row.rec.note)
                                         .font(theme::body(11.0))
-                                        .color(theme::AMBER),
+                                        .color(palette.caution),
                                 );
                             }
                             if let Some(cmd) = row.rec.command {
                                 ui.label(
-                                    RichText::new(spaced("RUNS"))
-                                        .font(theme::display(9.0))
-                                        .color(theme::FAINT),
+                                    RichText::new("Runs")
+                                        .font(theme::body(9.5))
+                                        .color(palette.faint),
                                 );
                                 Frame::none()
-                                    .fill(Color32::from_rgb(3, 5, 8))
-                                    .stroke(Stroke::new(1.0, theme::edge_soft()))
-                                    .rounding(Rounding::same(3.0))
+                                    .fill(palette.surface)
+                                    .stroke(Stroke::new(1.0, palette.edge_soft))
+                                    .rounding(Rounding::same(7.0))
                                     .inner_margin(Margin::symmetric(7.0, 4.0))
                                     .show(ui, |ui| {
                                         ui.label(
                                             RichText::new(cmd)
                                                 .font(theme::mono(10.0))
-                                                .color(theme::CYAN),
+                                                .color(palette.accent),
                                         );
                                     });
                             }
@@ -1290,7 +1304,7 @@ impl App {
                                     Label::new(
                                         RichText::new("reveal in Finder ↗")
                                             .font(theme::mono(10.0))
-                                            .color(theme::CYAN),
+                                            .color(palette.accent),
                                     )
                                     .sense(Sense::click()),
                                 )
@@ -1304,7 +1318,7 @@ impl App {
                                     Label::new(
                                         RichText::new("→ SSD")
                                             .font(theme::mono(10.0))
-                                            .color(theme::DIM),
+                                            .color(palette.muted),
                                     )
                                     .sense(Sense::click()),
                                 )
@@ -1326,18 +1340,18 @@ impl App {
                                 ui.label(
                                     RichText::new(size_txt)
                                         .font(theme::mono(12.5))
-                                        .color(theme::INK)
+                                        .color(palette.ink)
                                         .strong(),
                                 );
                             });
                             // action chip
                             let (chip_txt, chip_color, cyclable) =
                                 match (row.rec.action, row.action) {
-                                    (Action::Command, _) => ("SCRIPT", theme::CYAN, false),
-                                    (Action::Empty, _) => ("EMPTY", theme::CYAN, false),
-                                    (_, Action::Trash) => ("→ TRASH", theme::AMBER, true),
-                                    (_, Action::Delete) => ("ERASE", theme::RED, true),
-                                    _ => ("?", theme::DIM, false),
+                                    (Action::Command, _) => ("Script", palette.accent, false),
+                                    (Action::Empty, _) => ("Empty", palette.accent, false),
+                                    (_, Action::Trash) => ("Trash", palette.safe, true),
+                                    (_, Action::Delete) => ("Erase", palette.danger, true),
+                                    _ => ("?", palette.muted, false),
                                 };
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                 let (chip, resp) =
@@ -1345,14 +1359,14 @@ impl App {
                                 let p = ui.painter();
                                 p.rect_stroke(
                                     chip,
-                                    Rounding::same(3.0),
+                                    Rounding::same(6.0),
                                     Stroke::new(1.0, chip_color.gamma_multiply(0.55)),
                                 );
                                 p.text(
                                     chip.center(),
                                     Align2::CENTER_CENTER,
-                                    spaced(chip_txt),
-                                    theme::display(9.5),
+                                    chip_txt,
+                                    theme::body(9.5),
                                     chip_color,
                                 );
                                 if cyclable && resp.clicked() && !cleaning {
@@ -1381,14 +1395,16 @@ impl App {
                             // status
                             let status = match &row.status {
                                 RecStatus::Idle => None,
-                                RecStatus::Running => Some(("RUNNING".to_string(), theme::CYAN)),
+                                RecStatus::Running => Some(("Running".to_string(), palette.accent)),
                                 RecStatus::Cleared(_) => {
-                                    Some(("CLEARED".to_string(), theme::GREEN))
+                                    Some(("Cleared".to_string(), palette.safe))
                                 }
                                 RecStatus::InTrash(_) => {
-                                    Some(("IN TRASH".to_string(), theme::GREEN))
+                                    Some(("In Trash".to_string(), palette.safe))
                                 }
-                                RecStatus::Failed(_) => Some(("FAILED".to_string(), theme::RED)),
+                                RecStatus::Failed(_) => {
+                                    Some(("Failed".to_string(), palette.danger))
+                                }
                             };
                             if let Some((txt, color)) = status {
                                 ui.with_layout(
@@ -1411,28 +1427,39 @@ impl App {
     }
 
     fn reclaim_footer(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
         let p = ui.painter();
         p.line_segment(
             [
                 pos2(rect.min.x + 1.0, rect.min.y),
                 pos2(rect.max.x - 1.0, rect.min.y),
             ],
-            Stroke::new(1.0, theme::edge_soft()),
+            Stroke::new(1.0, palette.edge_soft),
         );
         let armed: Vec<&RecRow> = self.recs.iter().filter(|r| r.checked).collect();
         let bytes: i64 = armed.iter().map(|r| r.rec.bytes).sum();
         let count = armed.len();
+        let needs_review = armed
+            .iter()
+            .any(|row| row.rec.tier == Tier::Caution || row.action == Action::Delete);
+        let action_color = if self.cleaning {
+            palette.accent
+        } else if needs_review {
+            palette.caution
+        } else {
+            palette.safe
+        };
 
         p.text(
             rect.min + vec2(16.0, 12.0),
             Align2::LEFT_TOP,
-            spaced(&if count > 0 {
-                format!("{count} TARGET{} ARMED", if count > 1 { "S" } else { "" })
+            if count > 0 {
+                format!("{count} selected")
             } else {
-                "NOTHING SELECTED".to_string()
-            }),
-            theme::display(10.0),
-            theme::DIM,
+                "Nothing selected".to_string()
+            },
+            theme::body(10.0),
+            palette.muted,
         );
         if count > 0 {
             p.text(
@@ -1440,7 +1467,7 @@ impl App {
                 Align2::LEFT_TOP,
                 format!("≈ {}", fmt_bytes(bytes)),
                 theme::mono(16.0),
-                theme::AMBER,
+                action_color,
             );
         }
 
@@ -1452,25 +1479,24 @@ impl App {
         let enabled = count > 0 && !self.cleaning;
         let resp = ui.interact(btn, ui.id().with("reclaim"), Sense::click_and_drag());
         let alpha = if enabled { 1.0 } else { 0.35 };
-        let border = if self.cleaning {
-            theme::CYAN
-        } else {
-            theme::AMBER
-        };
-        p.rect_filled(
-            btn,
-            Rounding::same(5.0),
-            theme::amber_dim((if resp.hovered() && enabled { 36 } else { 18 }) as u8),
+        let border = action_color;
+        let fill_alpha = if resp.hovered() && enabled { 42 } else { 24 };
+        let fill = Color32::from_rgba_unmultiplied(
+            action_color.r(),
+            action_color.g(),
+            action_color.b(),
+            fill_alpha,
         );
+        p.rect_filled(btn, Rounding::same(9.0), fill);
         p.rect_stroke(
             btn,
-            Rounding::same(5.0),
+            Rounding::same(9.0),
             Stroke::new(1.0, border.gamma_multiply(0.6 * alpha)),
         );
 
         // hold ring
         let ring_c = pos2(btn.min.x + 24.0, btn.center().y);
-        p.circle_stroke(ring_c, 10.0, Stroke::new(3.0, theme::amber_dim(50)));
+        p.circle_stroke(ring_c, 10.0, Stroke::new(3.0, palette.edge));
         if self.hold > 0.0 {
             let pts: Vec<Pos2> = (0..=32)
                 .map(|i| {
@@ -1479,18 +1505,18 @@ impl App {
                     ring_c + vec2(a.cos(), a.sin()) * 10.0
                 })
                 .collect();
-            p.add(egui::Shape::line(pts, Stroke::new(3.0, theme::AMBER)));
+            p.add(egui::Shape::line(pts, Stroke::new(3.0, action_color)));
         }
         let label = if self.cleaning {
-            "RECLAIMING…"
+            "Reclaiming…"
         } else {
-            "HOLD TO RECLAIM"
+            "Hold to reclaim"
         };
         p.text(
             pos2(btn.min.x + 44.0, btn.center().y),
             Align2::LEFT_CENTER,
-            spaced(label),
-            theme::display(13.0),
+            label,
+            theme::body(12.0),
             border.gamma_multiply(alpha),
         );
 
@@ -1507,22 +1533,23 @@ impl App {
     }
 
     fn offload_dialog(&mut self, ctx: &Context) {
+        let palette = theme::palette(ctx);
         let Some(mut dlg) = self.dialog.take() else {
             return;
         };
         let mut keep_open = true;
         let mut launch = false;
 
-        egui::Window::new(RichText::new("MOVE TO SSD").font(theme::display(13.0)))
+        egui::Window::new(RichText::new("Move to external drive").font(theme::body(13.0)))
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.set_width(460.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(dlg.src.display().to_string()).font(theme::mono(10.5)).color(theme::DIM));
+                    ui.label(RichText::new(dlg.src.display().to_string()).font(theme::mono(10.5)).color(palette.muted));
                     if ui
-                        .add(Label::new(RichText::new("⧉ copy").font(theme::mono(9.5)).color(theme::CYAN)).sense(Sense::click()))
+                        .add(Label::new(RichText::new("⧉ copy").font(theme::mono(9.5)).color(palette.accent)).sense(Sense::click()))
                         .on_hover_text("copy path to clipboard")
                         .clicked()
                     {
@@ -1530,11 +1557,11 @@ impl App {
                         ui.ctx().output_mut(|o| o.copied_text = p);
                     }
                 });
-                ui.label(RichText::new(fmt_bytes(dlg.size)).font(theme::mono(10.5)).color(theme::FAINT));
+                ui.label(RichText::new(fmt_bytes(dlg.size)).font(theme::mono(10.5)).color(palette.faint));
                 ui.add_space(8.0);
 
                 if let Some(reason) = dlg.reason.clone() {
-                    ui.label(RichText::new(format!("✗ {reason}")).font(theme::mono(10.5)).color(theme::RED));
+                    ui.label(RichText::new(format!("✗ {reason}")).font(theme::mono(10.5)).color(palette.danger));
                     ui.add_space(8.0);
                     if ui.button(RichText::new("Close").font(theme::mono(10.5))).clicked() {
                         keep_open = false;
@@ -1553,14 +1580,14 @@ impl App {
                             }
                         });
                 } else {
-                    ui.label(RichText::new(format!("target: {}", dlg.vols[0].name)).font(theme::mono(10.5)).color(theme::DIM));
+                    ui.label(RichText::new(format!("target: {}", dlg.vols[0].name)).font(theme::mono(10.5)).color(palette.muted));
                 }
                 let vol = &dlg.vols[dlg.vol_idx];
                 let room = has_room(dlg.size, vol.free_bytes);
-                let free_color = if room { theme::FAINT } else { theme::RED };
+                let free_color = if room { palette.faint } else { palette.danger };
                 ui.label(RichText::new(format!("{} free", fmt_bytes(vol.free_bytes))).font(theme::mono(9.5)).color(free_color));
                 if vol.fs_type == "exfat" {
-                    ui.label(RichText::new("note: exFAT can't keep macOS metadata (xattrs, resource forks, internal symlinks)").font(theme::mono(9.0)).color(theme::AMBER));
+                    ui.label(RichText::new("note: exFAT can't keep macOS metadata (xattrs, resource forks, internal symlinks)").font(theme::mono(9.0)).color(palette.caution));
                 }
                 ui.add_space(8.0);
 
@@ -1574,9 +1601,9 @@ impl App {
                 });
                 if dlg.show_info {
                     ui.add_space(4.0);
-                    ui.label(RichText::new("Leave a symlink — apps and paths that point at the old location keep working; you free internal space with nothing to reconfigure. Trade-off: the link dangles while the SSD is unplugged (works again on reconnect).").font(theme::mono(9.5)).color(theme::DIM));
+                    ui.label(RichText::new("Leave a symlink — apps and paths that point at the old location keep working; you free internal space with nothing to reconfigure. Trade-off: the link dangles while the SSD is unplugged (works again on reconnect).").font(theme::mono(9.5)).color(palette.muted));
                     ui.add_space(2.0);
-                    ui.label(RichText::new("Clean move — nothing points back: no dangling-link risk, fully portable. Trade-off: anything referencing the old path breaks until you move it back.").font(theme::mono(9.5)).color(theme::DIM));
+                    ui.label(RichText::new("Clean move — nothing points back: no dangling-link risk, fully portable. Trade-off: anything referencing the old path breaks until you move it back.").font(theme::mono(9.5)).color(palette.muted));
                 }
                 ui.add_space(10.0);
 
@@ -1590,20 +1617,20 @@ impl App {
                 ui.horizontal(|ui| {
                     let enabled = can_confirm_offload(dlg.acknowledged, room, dlg.reason.is_none());
                     let label = if !room {
-                        "NOT ENOUGH SPACE"
+                        "Not enough space"
                     } else if !dlg.acknowledged {
-                        "TICK ACKNOWLEDGEMENT"
+                        "Confirm the acknowledgement"
                     } else {
-                        "HOLD TO MOVE"
+                        "Hold to move"
                     };
                     let (rect, resp) = ui.allocate_exact_size(vec2(220.0, 30.0), Sense::click_and_drag());
-                    let base = if enabled { theme::amber_dim(80) } else { theme::edge_soft() };
-                    ui.painter().rect_stroke(rect, Rounding::same(4.0), Stroke::new(1.0, base));
+                    let base = if enabled { palette.caution } else { palette.edge };
+                    ui.painter().rect_stroke(rect, Rounding::same(8.0), Stroke::new(1.0, base));
                     if self.dialog_hold > 0.0 {
                         let fill = Rect::from_min_size(rect.min, vec2(rect.width() * self.dialog_hold, rect.height()));
-                        ui.painter().rect_filled(fill, Rounding::same(4.0), Color32::from_rgba_unmultiplied(255, 178, 77, 30));
+                        ui.painter().rect_filled(fill, Rounding::same(8.0), palette.caution_dim(34));
                     }
-                    ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, theme::mono(10.5), theme::DIM);
+                    ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, theme::body(10.5), if enabled { palette.caution } else { palette.faint });
                     if enabled && resp.is_pointer_button_down_on() {
                         self.dialog_hold += ui.input(|i| i.stable_dt).min(0.1) / HOLD_SECS;
                         ui.ctx().request_repaint();
@@ -1644,9 +1671,10 @@ impl App {
     }
 
     fn ops_panel(&mut self, ctx: &Context) {
+        let palette = theme::palette(ctx);
         egui::TopBottomPanel::bottom("ops")
-            .exact_height(138.0)
-            .frame(Frame::none().fill(theme::BG).inner_margin(Margin {
+            .exact_height(108.0)
+            .frame(Frame::none().fill(palette.canvas).inner_margin(Margin {
                 left: 12.0,
                 right: 12.0,
                 top: 0.0,
@@ -1655,13 +1683,13 @@ impl App {
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
                 let sub = if self.cleaning {
-                    ("executing reclaim plan".to_string(), theme::CYAN)
+                    ("Reclaiming".to_string(), palette.accent)
                 } else if self.scanning() {
-                    ("scanning".to_string(), theme::CYAN)
+                    ("Scanning".to_string(), palette.accent)
                 } else {
-                    ("idle".to_string(), theme::FAINT)
+                    ("Idle".to_string(), palette.faint)
                 };
-                let content = panel_chrome(ui, rect, "OPS FEED", Some(sub));
+                let content = panel_chrome(ui, rect, "Activity", Some(sub));
                 ui.allocate_new_ui(
                     egui::UiBuilder::new().max_rect(content.shrink2(vec2(14.0, 6.0))),
                     |ui| {
@@ -1672,17 +1700,17 @@ impl App {
                                 ui.spacing_mut().item_spacing.y = 2.0;
                                 for line in &self.ops {
                                     let color = match line.kind {
-                                        OpsKind::Info => theme::CYAN,
-                                        OpsKind::Ok => theme::GREEN,
-                                        OpsKind::Err => theme::RED,
-                                        OpsKind::Dim => theme::DIM,
-                                        OpsKind::Amber => theme::AMBER,
+                                        OpsKind::Info => palette.accent,
+                                        OpsKind::Ok => palette.safe,
+                                        OpsKind::Err => palette.danger,
+                                        OpsKind::Dim => palette.muted,
+                                        OpsKind::Amber => palette.caution,
                                     };
                                     ui.horizontal_wrapped(|ui| {
                                         ui.label(
                                             RichText::new(&line.time)
                                                 .font(theme::mono(9.5))
-                                                .color(theme::FAINT),
+                                                .color(palette.faint),
                                         );
                                         ui.label(
                                             RichText::new(&line.text)
@@ -1698,6 +1726,7 @@ impl App {
     }
 
     fn stamp_overlay(&mut self, ctx: &Context) {
+        let palette = theme::palette(ctx);
         let Some((text, t0)) = &self.stamp else {
             return;
         };
@@ -1719,18 +1748,14 @@ impl App {
             .anchor(Align2::CENTER_CENTER, vec2(0.0, -60.0))
             .interactable(false)
             .show(ctx, |ui| {
-                let green = theme::GREEN.gamma_multiply(alpha);
+                let safe = palette.safe.gamma_multiply(alpha);
                 Frame::none()
-                    .fill(Color32::from_rgb(7, 9, 13).gamma_multiply(alpha * 0.85))
-                    .stroke(Stroke::new(3.0, green))
-                    .rounding(Rounding::same(10.0))
+                    .fill(palette.surface.gamma_multiply(alpha * 0.92))
+                    .stroke(Stroke::new(2.0, safe))
+                    .rounding(Rounding::same(12.0))
                     .inner_margin(Margin::symmetric(30.0, 14.0))
                     .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(spaced(&text))
-                                .font(theme::display(40.0))
-                                .color(green),
-                        );
+                        ui.label(RichText::new(&text).font(theme::display(34.0)).color(safe));
                     });
             });
     }

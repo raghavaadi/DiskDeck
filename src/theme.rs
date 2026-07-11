@@ -4,8 +4,7 @@
 //! danger = failure or irreversible action.
 
 use egui::{
-    Color32, Context, FontData, FontDefinitions, FontFamily, FontId, Stroke, Theme,
-    ThemePreference,
+    Color32, Context, FontData, FontDefinitions, FontFamily, FontId, Stroke, Theme, ThemePreference,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,35 +85,6 @@ pub fn palette(ctx: &Context) -> Palette {
     Palette::for_theme(ctx.theme())
 }
 
-pub const BG: Color32 = Color32::from_rgb(7, 9, 13);
-pub const PANEL: Color32 = Color32::from_rgb(13, 18, 26);
-pub const INK: Color32 = Color32::from_rgb(215, 225, 238);
-pub const DIM: Color32 = Color32::from_rgb(107, 122, 141);
-pub const FAINT: Color32 = Color32::from_rgb(61, 74, 92);
-pub const AMBER: Color32 = Color32::from_rgb(255, 178, 77);
-pub const CYAN: Color32 = Color32::from_rgb(98, 217, 240);
-pub const GREEN: Color32 = Color32::from_rgb(134, 224, 122);
-pub const RED: Color32 = Color32::from_rgb(255, 93, 110);
-
-pub fn edge() -> Color32 {
-    Color32::from_rgba_unmultiplied(140, 175, 215, 30)
-}
-pub fn edge_soft() -> Color32 {
-    Color32::from_rgba_unmultiplied(140, 175, 215, 16)
-}
-pub fn amber_dim(a: u8) -> Color32 {
-    Color32::from_rgba_unmultiplied(255, 178, 77, a)
-}
-pub fn cyan_dim(a: u8) -> Color32 {
-    Color32::from_rgba_unmultiplied(98, 217, 240, a)
-}
-pub fn green_dim(a: u8) -> Color32 {
-    Color32::from_rgba_unmultiplied(134, 224, 122, a)
-}
-pub fn red_dim(a: u8) -> Color32 {
-    Color32::from_rgba_unmultiplied(255, 93, 110, a)
-}
-
 pub fn install(ctx: &Context) {
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert(
@@ -191,6 +161,7 @@ pub fn body(size: f32) -> FontId {
 /// rendered tofu — U+200A has no glyph in Saira Condensed, and at the time
 /// the display family had no fallback. Condensed caps read fine unspaced;
 /// don't reintroduce invisible-space tricks without checking glyph coverage.)
+#[allow(dead_code)]
 pub fn spaced(s: &str) -> String {
     s.to_string()
 }
@@ -206,9 +177,7 @@ fn contrast_ratio(a: Color32, b: Color32) -> f32 {
                 ((value + 0.055) / 1.055).powf(2.4)
             }
         }
-        0.2126 * channel(color.r())
-            + 0.7152 * channel(color.g())
-            + 0.0722 * channel(color.b())
+        0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
     }
 
     let a = luminance(a);

@@ -4,7 +4,7 @@
 use crate::clean::fmt_bytes;
 use crate::scan::Node;
 use crate::theme;
-use egui::{Align2, Color32, Pos2, Rect, Stroke, Vec2};
+use egui::{Align2, Color32, Pos2, Rect, Stroke, Theme, Vec2};
 use std::sync::Arc;
 
 const MAX_RECTS: usize = 40;
@@ -159,14 +159,26 @@ pub fn squarify(items: &[Item], area: Rect) -> Vec<(usize, Rect)> {
     out
 }
 
-const FILLS: [Color32; 6] = [
-    Color32::from_rgb(36, 49, 70),
-    Color32::from_rgb(33, 44, 62),
-    Color32::from_rgb(30, 40, 55),
-    Color32::from_rgb(28, 36, 49),
-    Color32::from_rgb(26, 33, 44),
-    Color32::from_rgb(24, 30, 40),
-];
+fn map_fills(theme: Theme) -> [Color32; 6] {
+    match theme {
+        Theme::Light => [
+            Color32::from_rgb(0x3e, 0x88, 0xb1),
+            Color32::from_rgb(0x67, 0xb1, 0xa5),
+            Color32::from_rgb(0x8f, 0xa7, 0xb9),
+            Color32::from_rgb(0xe0, 0xac, 0x63),
+            Color32::from_rgb(0xb4, 0xc1, 0xcc),
+            Color32::from_rgb(0x72, 0x93, 0xa8),
+        ],
+        Theme::Dark => [
+            Color32::from_rgb(0x24, 0x5a, 0x75),
+            Color32::from_rgb(0x34, 0x7c, 0x79),
+            Color32::from_rgb(0x4a, 0x60, 0x72),
+            Color32::from_rgb(0x76, 0x5b, 0x40),
+            Color32::from_rgb(0x30, 0x3e, 0x4c),
+            Color32::from_rgb(0x29, 0x4b, 0x5a),
+        ],
+    }
+}
 
 /// Map `r` (laid out in `full`) into `src`, for the zoom-from animation.
 fn map_into(r: Rect, full: Rect, src: Rect) -> Rect {
@@ -192,6 +204,8 @@ pub fn paint(
     hover_pos: Option<Pos2>,
     zoom: Option<(Rect, f32)>,
 ) -> Option<usize> {
+    let palette = theme::palette(ui.ctx());
+    let fills = map_fills(ui.ctx().theme());
     let painter = ui.painter().with_clip_rect(area);
     let mut hovered = None;
 
@@ -209,27 +223,27 @@ pub fn paint(
         if is_hover {
             hovered = Some(idx);
         }
-        let mut fill = FILLS[idx.min(FILLS.len() - 1)];
+        let mut fill = fills[idx.min(fills.len() - 1)];
         if it.synthetic {
-            fill = Color32::from_rgb(17, 22, 30);
+            fill = palette.surface_raised;
         }
-        painter.rect_filled(r, 2.5, fill);
+        painter.rect_filled(r, 5.0, fill);
         let stroke = if is_hover {
-            Stroke::new(1.5, theme::amber_dim(220))
+            Stroke::new(2.0, palette.accent)
         } else if it.denied {
-            Stroke::new(1.0, theme::red_dim(140))
+            Stroke::new(1.3, palette.danger)
         } else {
-            Stroke::new(1.0, theme::edge_soft())
+            Stroke::new(1.0, palette.edge_soft)
         };
-        painter.rect_stroke(r, 2.5, stroke);
+        painter.rect_stroke(r, 5.0, stroke);
 
         // labels only where they fit
         if r.width() > 64.0 && r.height() > 30.0 {
             let p = painter.with_clip_rect(r.shrink(4.0));
             let name_color = if it.synthetic {
-                theme::FAINT
+                palette.faint
             } else {
-                theme::INK
+                palette.ink
             };
             p.text(
                 r.min + Vec2::new(8.0, 6.0),
@@ -244,7 +258,7 @@ pub fn paint(
                     Align2::LEFT_TOP,
                     fmt_bytes(it.bytes),
                     theme::mono(10.0),
-                    theme::amber_dim(210),
+                    palette.muted,
                 );
             }
         }
@@ -294,5 +308,16 @@ mod tests {
         .is_empty());
         let items = vec![item(100)];
         assert!(squarify(&items, Rect::from_min_size(Pos2::ZERO, Vec2::new(1.0, 1.0))).is_empty());
+    }
+
+    #[test]
+    fn map_palettes_adapt_without_changing_category_count() {
+        let light = map_fills(egui::Theme::Light);
+        let dark = map_fills(egui::Theme::Dark);
+        assert_eq!(light.len(), 6);
+        assert_eq!(dark.len(), 6);
+        assert_ne!(light, dark);
+        assert_eq!(light[0], Color32::from_rgb(0x3e, 0x88, 0xb1));
+        assert_eq!(dark[0], Color32::from_rgb(0x24, 0x5a, 0x75));
     }
 }
