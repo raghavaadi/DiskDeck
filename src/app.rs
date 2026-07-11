@@ -1201,8 +1201,8 @@ impl App {
             palette.safe
         };
         let (border, fill) = match (&row.status, row.checked) {
-            (RecStatus::Running, _) => (palette.accent_dim(110), palette.accent_dim(10)),
-            (RecStatus::Failed(_), _) => (palette.danger_dim(120), Color32::TRANSPARENT),
+            (RecStatus::Running, _) => (palette.accent_dim(110), palette.surface_raised),
+            (RecStatus::Failed(_), _) => (palette.danger_dim(120), palette.surface_raised),
             (_, true) => (
                 Color32::from_rgba_unmultiplied(
                     selected_color.r(),
@@ -1210,12 +1210,7 @@ impl App {
                     selected_color.b(),
                     110,
                 ),
-                Color32::from_rgba_unmultiplied(
-                    selected_color.r(),
-                    selected_color.g(),
-                    selected_color.b(),
-                    10,
-                ),
+                palette.surface_raised,
             ),
             _ => (palette.edge_soft, palette.surface_raised),
         };
