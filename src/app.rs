@@ -458,6 +458,22 @@ fn back_target(depth: usize) -> Option<usize> {
     depth.checked_sub(1)
 }
 
+fn should_open_from_primary(
+    actions: MapItemActions,
+    primary_clicked: bool,
+    control_down: bool,
+) -> bool {
+    actions.open && primary_clicked && !control_down
+}
+
+fn should_navigate_back_on_escape(
+    escape_pressed: bool,
+    menu_was_open: bool,
+    menu_is_open: bool,
+) -> bool {
+    escape_pressed && !menu_was_open && !menu_is_open
+}
+
 enum MapActionRequest {
     Open {
         node: Arc<Node>,
@@ -576,6 +592,25 @@ mod tests {
         assert_eq!(back_target(0), None);
         assert_eq!(back_target(1), Some(0));
         assert_eq!(back_target(3), Some(2));
+    }
+
+    #[test]
+    fn control_click_opens_the_menu_without_primary_navigation() {
+        let actions = MapItemActions {
+            open: true,
+            reveal: true,
+            move_to_ssd: true,
+        };
+        assert!(should_open_from_primary(actions, true, false));
+        assert!(!should_open_from_primary(actions, true, true));
+    }
+
+    #[test]
+    fn escape_closes_an_open_menu_before_navigating_back() {
+        assert!(should_navigate_back_on_escape(true, false, false));
+        assert!(!should_navigate_back_on_escape(true, true, false));
+        assert!(!should_navigate_back_on_escape(true, false, true));
+        assert!(!should_navigate_back_on_escape(false, false, false));
     }
 }
 
@@ -1248,6 +1283,7 @@ impl App {
         let hovered = treemap::paint(ui, map_rect, &items, &laid, hover, zoom);
         let mut requested_action: Option<MapActionRequest> = None;
         let mut menu_open = false;
+        let mut menu_was_open = false;
 
         for &(idx, item_rect) in &laid {
             let item = &items[idx];
@@ -1264,7 +1300,11 @@ impl App {
             );
             let item_node = item.node.clone();
 
-            if interactions_enabled && response.clicked() && actions.open {
+            let primary_clicked = response.clicked();
+            let control_down = ui.input(|input| input.modifiers.ctrl);
+            if interactions_enabled
+                && should_open_from_primary(actions, primary_clicked, control_down)
+            {
                 if let Some(node) = item_node.clone() {
                     requested_action = Some(MapActionRequest::Open {
                         node,
@@ -1273,6 +1313,7 @@ impl App {
                 }
             }
 
+            menu_was_open |= response.context_menu_opened();
             response.context_menu(|menu_ui| {
                 menu_ui.set_min_width(180.0);
                 if menu_ui
@@ -1370,7 +1411,8 @@ impl App {
             None => {}
         }
 
-        if !menu_open && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        let escape_pressed = ui.input(|input| input.key_pressed(egui::Key::Escape));
+        if should_navigate_back_on_escape(escape_pressed, menu_was_open, menu_open) {
             if let Some(target) = back_target(self.crumbs.len()) {
                 self.crumbs.truncate(target);
                 self.view = self.crumbs.last().cloned();
