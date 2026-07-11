@@ -48,4 +48,6 @@ ui moved-items-visible
 ui escape
 ui growth-watch-visible
 ui escape
+ui developer-lens-visible
+ui escape
 echo "signed UI smoke check passed"

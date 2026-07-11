@@ -4,6 +4,7 @@
 use crate::clean::{
     fmt_bytes, fmt_count, open_full_disk_access, reveal_in_finder, run_clean, CleanEvent, CleanJob,
 };
+use crate::developer;
 use crate::history::{
     default_history_dir, load_growth_watch, record_scan, set_folder_watched, GrowthSummary,
     GrowthWatch, HistoryEvent, TimelinePoint,
@@ -82,12 +83,15 @@ enum RailView {
     Reclaim,
     Moved,
     Growth,
+    Developer,
 }
 
 fn rail_back_target(view: RailView) -> Option<RailView> {
     match view {
         RailView::Summary => None,
-        RailView::Reclaim | RailView::Moved | RailView::Growth => Some(RailView::Summary),
+        RailView::Reclaim | RailView::Moved | RailView::Growth | RailView::Developer => {
+            Some(RailView::Summary)
+        }
     }
 }
 
@@ -944,6 +948,10 @@ mod tests {
         assert_eq!(rail_back_target(RailView::Reclaim), Some(RailView::Summary));
         assert_eq!(rail_back_target(RailView::Moved), Some(RailView::Summary));
         assert_eq!(rail_back_target(RailView::Growth), Some(RailView::Summary));
+        assert_eq!(
+            rail_back_target(RailView::Developer),
+            Some(RailView::Summary)
+        );
     }
 
     #[test]
@@ -1940,6 +1948,10 @@ impl App {
                 self.draw_growth_watch(ui, rect);
                 return;
             }
+            RailView::Developer => {
+                self.draw_developer_lens(ui, rect);
+                return;
+            }
             RailView::Reclaim => {}
         }
 
@@ -2181,6 +2193,27 @@ impl App {
             {
                 self.rail_view = RailView::Growth;
                 self.begin_growth_refresh();
+            }
+        });
+        let developer_rect = Rect::from_min_size(
+            pos2(rect.min.x, growth_rect.max.y + 8.0),
+            vec2(rect.width(), 34.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(developer_rect), |ui| {
+            let button = egui::Button::new(
+                RichText::new("Developer Lens")
+                    .font(theme::display_md(10.5))
+                    .color(palette.accent),
+            )
+            .fill(palette.surface)
+            .stroke(Stroke::new(1.0, palette.edge_soft))
+            .rounding(Rounding::same(8.0));
+            if ui
+                .add_sized(ui.available_size(), button)
+                .on_hover_text("Explain local developer storage without changing the reclaim plan")
+                .clicked()
+            {
+                self.rail_view = RailView::Developer;
             }
         });
 
@@ -2656,6 +2689,166 @@ impl App {
         if let Some((path, watched)) = watch_change {
             self.set_growth_folder(path, watched);
         }
+    }
+
+    fn draw_developer_lens(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let recs: Vec<Rec> = self.recs.iter().map(|row| row.rec.clone()).collect();
+        let groups = developer::analyze(&recs);
+        let total: i64 = groups.iter().map(|group| group.bytes).sum();
+        let meta = if self.recs_built {
+            format!("{} groups · {}", groups.len(), fmt_bytes(total))
+        } else {
+            "waiting for scan".into()
+        };
+        let content = panel_chrome(ui, rect, "Developer Lens", Some((meta, palette.faint)));
+        let nav = Rect::from_min_size(
+            content.min + vec2(10.0, 4.0),
+            vec2(content.width() - 20.0, 30.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(nav), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("← Reclaim summary")
+                            .font(theme::display_md(10.5))
+                            .color(palette.accent),
+                    )
+                    .frame(false),
+                )
+                .clicked()
+            {
+                self.rail_view = RailView::Summary;
+            }
+        });
+        let list = Rect::from_min_max(
+            pos2(content.min.x + 10.0, nav.max.y + 4.0),
+            pos2(content.max.x - 10.0, content.max.y - 4.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list), |ui| {
+            if !self.recs_built {
+                ui.label(
+                    RichText::new("Developer Lens becomes available after the read-only scan.")
+                        .font(theme::body(10.5))
+                        .color(palette.muted),
+                );
+                return;
+            }
+            if groups.is_empty() {
+                ui.label(
+                    RichText::new(
+                        "No developer-specific reclaim targets were measured in this scan.",
+                    )
+                    .font(theme::body(10.5))
+                    .color(palette.muted),
+                );
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(
+                            "Read-only explanation · selections and safety tiers stay in Review targets.",
+                        )
+                        .font(theme::body(9.5))
+                        .color(palette.faint),
+                    );
+                    ui.add_space(6.0);
+                    for group in &groups {
+                        Frame::none()
+                            .fill(palette.surface)
+                            .stroke(Stroke::new(1.0, palette.edge_soft))
+                            .rounding(Rounding::same(9.0))
+                            .inner_margin(Margin::symmetric(10.0, 9.0))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(group.kind.title())
+                                            .font(theme::display_md(11.0))
+                                            .color(palette.ink),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                RichText::new(fmt_bytes(group.bytes))
+                                                    .font(theme::mono(10.0))
+                                                    .color(palette.accent),
+                                            );
+                                        },
+                                    );
+                                });
+                                ui.label(
+                                    RichText::new(group.kind.explanation())
+                                        .font(theme::body(9.5))
+                                        .color(palette.muted),
+                                );
+                                ui.add_space(5.0);
+                                for finding in group.findings.iter().take(4) {
+                                    ui.horizontal(|ui| {
+                                        let marker = if finding.caution { "!" } else { "✓" };
+                                        let color = if finding.caution {
+                                            palette.caution
+                                        } else {
+                                            palette.safe
+                                        };
+                                        ui.label(
+                                            RichText::new(marker)
+                                                .font(theme::mono(9.0))
+                                                .color(color),
+                                        );
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                RichText::new(tail_str(&finding.title, 27))
+                                                    .font(theme::body(9.5))
+                                                    .color(palette.ink),
+                                            );
+                                            ui.label(
+                                                RichText::new(tail_str(&finding.display, 34))
+                                                    .font(theme::mono(8.5))
+                                                    .color(palette.faint),
+                                            );
+                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    RichText::new(fmt_bytes(finding.bytes))
+                                                        .font(theme::mono(9.0))
+                                                        .color(palette.muted),
+                                                );
+                                            },
+                                        );
+                                    });
+                                    ui.add_space(3.0);
+                                }
+                                if group.findings.len() > 4 {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "+{} more measured target(s)",
+                                            group.findings.len() - 4
+                                        ))
+                                        .font(theme::mono(8.5))
+                                        .color(palette.faint),
+                                    );
+                                }
+                                if group.caution_count > 0 {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} need review and are never preselected",
+                                            group.caution_count
+                                        ))
+                                        .font(theme::body(8.5))
+                                        .color(palette.caution),
+                                    );
+                                }
+                            });
+                        ui.add_space(6.0);
+                    }
+                });
+        });
     }
 
     /// One recommendation card. Returns Some(path) if "reveal" was clicked.
