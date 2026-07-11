@@ -12,6 +12,8 @@ const MAGIC: &[u8; 8] = b"DDHIST1\0";
 const MIN_GROWTH_BYTES: i64 = 10 << 20;
 const MAX_ENTRIES: usize = 1_000_000;
 const MAX_PATH_BYTES: usize = 1 << 20;
+const WATCH_MAGIC: &[u8; 8] = b"DDWATCH1";
+const MAX_WATCHED: usize = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Growth {
@@ -24,6 +26,43 @@ pub struct GrowthSummary {
     pub previous_at_ms: i64,
     pub total_delta: i64,
     pub growers: Vec<Growth>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimelinePoint {
+    pub captured_at_ms: i64,
+    pub total_bytes: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderPoint {
+    pub captured_at_ms: i64,
+    pub bytes: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderSeries {
+    pub path: PathBuf,
+    pub points: Vec<FolderPoint>,
+    pub bytes_delta: i64,
+    pub percent_tenths: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecurringGrowth {
+    pub path: PathBuf,
+    pub positive_intervals: usize,
+    pub bytes_delta: i64,
+    pub current_bytes: i64,
+    pub percent_tenths: Option<i64>,
+    pub watched: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GrowthWatch {
+    pub timeline: Vec<TimelinePoint>,
+    pub recurring: Vec<RecurringGrowth>,
+    pub watched: Vec<FolderSeries>,
 }
 
 pub enum HistoryEvent {
@@ -268,6 +307,249 @@ fn load_latest_compatible(dir: &Path, root: &Path) -> Result<Option<Snapshot>, S
     Ok(None)
 }
 
+fn normalized_relative_path(path: &Path) -> bool {
+    let mut saw_component = false;
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) => saw_component = true,
+            _ => return false,
+        }
+    }
+    saw_component && path.as_os_str().as_bytes().len() <= MAX_PATH_BYTES
+}
+
+fn watchlist_path(dir: &Path) -> PathBuf {
+    dir.join("watchlist.ddwatch")
+}
+
+fn encode_watchlist(paths: &[PathBuf]) -> Result<Vec<u8>, String> {
+    if paths.len() > MAX_WATCHED {
+        return Err("Growth Watch has too many watched folders".into());
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(WATCH_MAGIC);
+    push_u32(&mut out, paths.len())?;
+    for path in paths {
+        if !normalized_relative_path(path) {
+            return Err("Growth Watch paths must be normalized scan-relative folders".into());
+        }
+        push_path(&mut out, path)?;
+    }
+    Ok(out)
+}
+
+fn decode_watchlist(bytes: &[u8]) -> Result<Vec<PathBuf>, String> {
+    let mut cursor = Cursor::new(bytes);
+    if &read_exact::<8>(&mut cursor)? != WATCH_MAGIC {
+        return Err("Growth Watch format is not supported".into());
+    }
+    let count = read_u32(&mut cursor)?;
+    if count > MAX_WATCHED {
+        return Err("Growth Watch has too many watched folders".into());
+    }
+    let mut paths = Vec::with_capacity(count);
+    for _ in 0..count {
+        let path = read_path(&mut cursor)?;
+        if !normalized_relative_path(&path) {
+            return Err("Growth Watch contains an unsafe path".into());
+        }
+        paths.push(path);
+    }
+    if cursor.position() != bytes.len() as u64 {
+        return Err("Growth Watch contains trailing data".into());
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn load_watched_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => decode_watchlist(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(format!("read Growth Watch: {error}")),
+    }
+}
+
+fn set_watched_paths(path: &Path, paths: &[PathBuf]) -> Result<(), String> {
+    if path.exists() {
+        load_watched_paths(path)?;
+    }
+    let mut normalized = paths.to_vec();
+    normalized.sort();
+    normalized.dedup();
+    let bytes = encode_watchlist(&normalized)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Growth Watch path has no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|error| format!("create Growth Watch: {error}"))?;
+    let pid = std::process::id();
+    let mut temp = None;
+    for attempt in 0..32u32 {
+        let candidate = parent.join(format!(".watchlist.{pid}.{attempt}.tmp"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                temp = Some((candidate, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("create Growth Watch update: {error}")),
+        }
+    }
+    let (temp_path, mut file) = temp.ok_or("reserve Growth Watch update")?;
+    let result = file
+        .write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .and_then(|_| std::fs::rename(&temp_path, path));
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("write Growth Watch: {error}"));
+    }
+    Ok(())
+}
+
+fn percentage_tenths(before: i64, delta: i64) -> Option<i64> {
+    (before > 0).then(|| {
+        ((delta as i128 * 1_000) / before as i128).clamp(i64::MIN as i128, i64::MAX as i128) as i64
+    })
+}
+
+fn build_growth_watch(snapshots: &[Snapshot], watched_paths: &[PathBuf]) -> GrowthWatch {
+    let timeline = snapshots
+        .iter()
+        .map(|snapshot| TimelinePoint {
+            captured_at_ms: snapshot.captured_at_ms,
+            total_bytes: snapshot.total_bytes,
+        })
+        .collect();
+
+    #[derive(Clone, Copy)]
+    struct Aggregate {
+        positive_intervals: usize,
+        bytes_delta: i64,
+        first_before: i64,
+        current_bytes: i64,
+    }
+    let mut aggregates: HashMap<PathBuf, Aggregate> = HashMap::new();
+    for pair in snapshots.windows(2) {
+        let previous: HashMap<&Path, i64> = pair[0]
+            .entries
+            .iter()
+            .filter(|entry| entry.is_dir)
+            .map(|entry| (entry.path.as_path(), entry.bytes))
+            .collect();
+        for entry in pair[1].entries.iter().filter(|entry| entry.is_dir) {
+            let before = previous.get(entry.path.as_path()).copied().unwrap_or(0);
+            let delta = entry.bytes.saturating_sub(before);
+            if delta < MIN_GROWTH_BYTES {
+                continue;
+            }
+            aggregates
+                .entry(entry.path.clone())
+                .and_modify(|aggregate| {
+                    aggregate.positive_intervals += 1;
+                    aggregate.bytes_delta = aggregate.bytes_delta.saturating_add(delta);
+                    aggregate.current_bytes = entry.bytes;
+                })
+                .or_insert(Aggregate {
+                    positive_intervals: 1,
+                    bytes_delta: delta,
+                    first_before: before,
+                    current_bytes: entry.bytes,
+                });
+        }
+    }
+    let mut recurring: Vec<RecurringGrowth> = aggregates
+        .into_iter()
+        .map(|(path, aggregate)| RecurringGrowth {
+            watched: watched_paths.contains(&path),
+            path,
+            positive_intervals: aggregate.positive_intervals,
+            bytes_delta: aggregate.bytes_delta,
+            current_bytes: aggregate.current_bytes,
+            percent_tenths: percentage_tenths(aggregate.first_before, aggregate.bytes_delta),
+        })
+        .collect();
+    recurring.sort_by(|left, right| {
+        right
+            .positive_intervals
+            .cmp(&left.positive_intervals)
+            .then_with(|| right.bytes_delta.cmp(&left.bytes_delta))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    recurring.truncate(12);
+
+    let watched = watched_paths
+        .iter()
+        .map(|path| {
+            let points: Vec<FolderPoint> = snapshots
+                .iter()
+                .map(|snapshot| FolderPoint {
+                    captured_at_ms: snapshot.captured_at_ms,
+                    bytes: snapshot
+                        .entries
+                        .iter()
+                        .find(|entry| entry.is_dir && entry.path == *path)
+                        .map(|entry| entry.bytes)
+                        .unwrap_or(0),
+                })
+                .collect();
+            let before = points.first().map(|point| point.bytes).unwrap_or(0);
+            let current = points.last().map(|point| point.bytes).unwrap_or(0);
+            let bytes_delta = current.saturating_sub(before);
+            FolderSeries {
+                path: path.clone(),
+                points,
+                bytes_delta,
+                percent_tenths: percentage_tenths(before, bytes_delta),
+            }
+        })
+        .collect();
+    GrowthWatch {
+        timeline,
+        recurring,
+        watched,
+    }
+}
+
+pub fn load_growth_watch(dir: &Path, root: &Path) -> Result<GrowthWatch, String> {
+    if !dir.exists() {
+        return Ok(GrowthWatch::default());
+    }
+    let watched = load_watched_paths(&watchlist_path(dir))?;
+    let mut snapshots = Vec::new();
+    for path in matching_snapshot_paths(dir)? {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok(snapshot) = decode(&bytes) else {
+            continue;
+        };
+        if snapshot.root == root {
+            snapshots.push(snapshot);
+        }
+    }
+    snapshots.sort_by_key(|snapshot| snapshot.captured_at_ms);
+    Ok(build_growth_watch(&snapshots, &watched))
+}
+
+pub fn set_folder_watched(dir: &Path, folder: &Path, watched: bool) -> Result<(), String> {
+    if !normalized_relative_path(folder) {
+        return Err("Growth Watch paths must be normalized scan-relative folders".into());
+    }
+    let path = watchlist_path(dir);
+    let mut paths = load_watched_paths(&path)?;
+    paths.retain(|existing| existing != folder);
+    if watched {
+        paths.push(folder.to_path_buf());
+    }
+    set_watched_paths(&path, &paths)
+}
+
 fn record(dir: &Path, current: &Snapshot) -> Result<Option<GrowthSummary>, String> {
     std::fs::create_dir_all(dir).map_err(|error| format!("create history: {error}"))?;
     let previous = load_latest_compatible(dir, &current.root)?;
@@ -498,5 +780,67 @@ mod tests {
         let summary = record(tmp.path(), &current).unwrap().unwrap();
         assert_eq!(summary.previous_at_ms, 10);
         assert_eq!(summary.total_delta, 25);
+    }
+
+    #[test]
+    fn growth_watch_orders_timeline_and_ranks_recurring_growth() {
+        let snapshots = vec![
+            Snapshot {
+                captured_at_ms: 10,
+                root: PathBuf::from("/System/Volumes/Data"),
+                total_bytes: 100 * MB,
+                entries: vec![entry("Users/project", 20 * MB), entry("Users/new", 0)],
+            },
+            Snapshot {
+                captured_at_ms: 20,
+                root: PathBuf::from("/System/Volumes/Data"),
+                total_bytes: 140 * MB,
+                entries: vec![entry("Users/project", 35 * MB), entry("Users/new", 25 * MB)],
+            },
+            Snapshot {
+                captured_at_ms: 30,
+                root: PathBuf::from("/System/Volumes/Data"),
+                total_bytes: 180 * MB,
+                entries: vec![entry("Users/project", 50 * MB), entry("Users/new", 30 * MB)],
+            },
+        ];
+
+        let watch = build_growth_watch(&snapshots, &[PathBuf::from("Users/project")]);
+        assert_eq!(
+            watch
+                .timeline
+                .iter()
+                .map(|p| p.captured_at_ms)
+                .collect::<Vec<_>>(),
+            vec![10, 20, 30]
+        );
+        assert_eq!(watch.recurring[0].path, PathBuf::from("Users/project"));
+        assert_eq!(watch.recurring[0].positive_intervals, 2);
+        assert_eq!(watch.recurring[0].bytes_delta, 30 * MB);
+        assert_eq!(watch.recurring[0].percent_tenths, Some(1500));
+        assert!(watch.recurring[0].watched);
+        assert_eq!(watch.watched[0].points.len(), 3);
+    }
+
+    #[test]
+    fn watchlist_round_trips_raw_paths_and_refuses_corrupt_overwrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("watchlist.ddwatch");
+        let raw = PathBuf::from(OsString::from_vec(b"Users/project-\xff".to_vec()));
+        set_watched_paths(&path, &[raw.clone()]).unwrap();
+        assert_eq!(load_watched_paths(&path).unwrap(), vec![raw]);
+
+        std::fs::write(&path, b"broken").unwrap();
+        assert!(set_watched_paths(&path, &[PathBuf::from("Users/other")]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"broken");
+    }
+
+    #[test]
+    fn watchlist_rejects_absolute_and_parent_traversal_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("watchlist.ddwatch");
+        assert!(set_watched_paths(&path, &[PathBuf::from("/Users/project")]).is_err());
+        assert!(set_watched_paths(&path, &[PathBuf::from("Users/../private")]).is_err());
+        assert!(!path.exists());
     }
 }
