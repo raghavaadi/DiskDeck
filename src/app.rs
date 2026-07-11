@@ -513,6 +513,25 @@ struct WorkspaceLayout {
     rail: Rect,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ReviewRowColumns {
+    text_width: f32,
+    gutter: f32,
+    utility_width: f32,
+}
+
+fn review_row_columns(available_width: f32) -> ReviewRowColumns {
+    let available_width = available_width.max(0.0);
+    let utility_width = available_width.min(72.0);
+    let gutter = (available_width - utility_width).clamp(0.0, 8.0);
+    let text_width = (available_width - utility_width - gutter).max(0.0);
+    ReviewRowColumns {
+        text_width,
+        gutter,
+        utility_width,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct MapItemActions {
     open: bool,
@@ -625,6 +644,19 @@ mod tests {
         let app = App::new();
         assert!(!app.review_open);
         assert!(!app.activity_open);
+    }
+
+    #[test]
+    fn review_rows_reserve_a_non_overlapping_utility_column() {
+        let columns = review_row_columns(276.0);
+
+        assert_eq!(columns.text_width, 196.0);
+        assert_eq!(columns.gutter, 8.0);
+        assert_eq!(columns.utility_width, 72.0);
+        assert!(
+            columns.text_width + columns.gutter + columns.utility_width <= 276.0,
+            "review-row columns must never exceed the available width"
+        );
     }
 
     #[test]
@@ -1868,122 +1900,132 @@ impl App {
                     ui.disable();
                 }
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
                     ui.checkbox(&mut row.checked, "");
-                    ui.vertical(|ui| {
-                        let title_resp = ui.add(
-                            Label::new(
-                                RichText::new(&row.rec.title)
-                                    .font(theme::display_md(13.0))
-                                    .color(palette.ink),
-                            )
-                            .sense(Sense::click())
-                            .truncate(),
-                        );
-                        ui.add(
-                            Label::new(
-                                RichText::new(&row.rec.display)
-                                    .font(theme::mono(9.5))
-                                    .color(palette.faint),
-                            )
-                            .truncate(),
-                        );
-                        if title_resp.clicked() {
-                            row.expanded = !row.expanded;
-                        }
-                        if row.expanded {
-                            ui.add_space(4.0);
-                            ui.label(
-                                RichText::new(row.rec.desc)
-                                    .font(theme::body(11.0))
-                                    .color(palette.muted),
+                    ui.add_space(8.0);
+                    let columns = review_row_columns(ui.available_width());
+                    ui.allocate_ui_with_layout(
+                        vec2(columns.text_width, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(columns.text_width);
+                            let title_resp = ui.add(
+                                Label::new(
+                                    RichText::new(&row.rec.title)
+                                        .font(theme::display_md(13.0))
+                                        .color(palette.ink),
+                                )
+                                .sense(Sense::click())
+                                .truncate(),
                             );
-                            ui.label(
-                                RichText::new("To restore")
-                                    .font(theme::body(9.5))
-                                    .color(palette.faint),
+                            ui.add(
+                                Label::new(
+                                    RichText::new(&row.rec.display)
+                                        .font(theme::mono(9.5))
+                                        .color(palette.faint),
+                                )
+                                .truncate(),
                             );
-                            ui.label(
-                                RichText::new(row.rec.restore)
-                                    .font(theme::body(11.0))
-                                    .color(palette.muted),
-                            );
-                            if !row.rec.note.is_empty() {
-                                ui.label(
-                                    RichText::new(&row.rec.note)
-                                        .font(theme::body(11.0))
-                                        .color(palette.caution),
-                                );
+                            if title_resp.clicked() {
+                                row.expanded = !row.expanded;
                             }
-                            if let Some(cmd) = row.rec.command {
+                            if row.expanded {
+                                ui.add_space(4.0);
                                 ui.label(
-                                    RichText::new("Runs")
+                                    RichText::new(row.rec.desc)
+                                        .font(theme::body(11.0))
+                                        .color(palette.muted),
+                                );
+                                ui.label(
+                                    RichText::new("To restore")
                                         .font(theme::body(9.5))
                                         .color(palette.faint),
                                 );
-                                Frame::none()
-                                    .fill(palette.surface)
-                                    .stroke(Stroke::new(1.0, palette.edge_soft))
-                                    .rounding(Rounding::same(7.0))
-                                    .inner_margin(Margin::symmetric(7.0, 4.0))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            RichText::new(cmd)
+                                ui.label(
+                                    RichText::new(row.rec.restore)
+                                        .font(theme::body(11.0))
+                                        .color(palette.muted),
+                                );
+                                if !row.rec.note.is_empty() {
+                                    ui.label(
+                                        RichText::new(&row.rec.note)
+                                            .font(theme::body(11.0))
+                                            .color(palette.caution),
+                                    );
+                                }
+                                if let Some(cmd) = row.rec.command {
+                                    ui.label(
+                                        RichText::new("Runs")
+                                            .font(theme::body(9.5))
+                                            .color(palette.faint),
+                                    );
+                                    Frame::none()
+                                        .fill(palette.surface)
+                                        .stroke(Stroke::new(1.0, palette.edge_soft))
+                                        .rounding(Rounding::same(7.0))
+                                        .inner_margin(Margin::symmetric(7.0, 4.0))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                RichText::new(cmd)
+                                                    .font(theme::mono(10.0))
+                                                    .color(palette.accent),
+                                            );
+                                        });
+                                }
+                                ui.add_space(2.0);
+                                if ui
+                                    .add(
+                                        Label::new(
+                                            RichText::new("reveal in Finder ↗")
                                                 .font(theme::mono(10.0))
                                                 .color(palette.accent),
-                                        );
-                                    });
-                            }
-                            ui.add_space(2.0);
-                            if ui
-                                .add(
+                                        )
+                                        .sense(Sense::click()),
+                                    )
+                                    .clicked()
+                                {
+                                    reveal = Some(row.rec.path.clone());
+                                }
+                                ui.add_space(2.0);
+                                let mut offload_response = ui.add_enabled(
+                                    offload_block.is_none(),
                                     Label::new(
-                                        RichText::new("reveal in Finder ↗")
+                                        RichText::new("→ SSD")
                                             .font(theme::mono(10.0))
-                                            .color(palette.accent),
+                                            .color(palette.muted),
                                     )
                                     .sense(Sense::click()),
-                                )
-                                .clicked()
-                            {
-                                reveal = Some(row.rec.path.clone());
-                            }
-                            ui.add_space(2.0);
-                            let mut offload_response = ui.add_enabled(
-                                offload_block.is_none(),
-                                Label::new(
-                                    RichText::new("→ SSD")
-                                        .font(theme::mono(10.0))
-                                        .color(palette.muted),
-                                )
-                                .sense(Sense::click()),
-                            );
-                            if let Some(block) = offload_block {
-                                offload_response =
-                                    offload_response.on_disabled_hover_text(block.message());
-                            } else {
-                                offload_response = offload_response
-                                    .on_hover_text("move this to an attached external drive");
-                            }
-                            if offload_response.clicked() {
-                                *offload_out = Some((rec_real.clone(), rec_size));
-                            }
-                        }
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                        ui.vertical(|ui| {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                let size_txt = if row.rec.estimate {
-                                    format!("≈{}", fmt_bytes(row.rec.bytes))
-                                } else {
-                                    fmt_bytes(row.rec.bytes)
-                                };
-                                ui.label(
-                                    RichText::new(size_txt)
-                                        .font(theme::mono(12.5))
-                                        .color(palette.ink)
-                                        .strong(),
                                 );
-                            });
+                                if let Some(block) = offload_block {
+                                    offload_response =
+                                        offload_response.on_disabled_hover_text(block.message());
+                                } else {
+                                    offload_response = offload_response
+                                        .on_hover_text("move this to an attached external drive");
+                                }
+                                if offload_response.clicked() {
+                                    *offload_out = Some((rec_real.clone(), rec_size));
+                                }
+                            }
+                        },
+                    );
+                    ui.add_space(columns.gutter);
+                    ui.allocate_ui_with_layout(
+                        vec2(columns.utility_width, 0.0),
+                        egui::Layout::top_down(egui::Align::Max),
+                        |ui| {
+                            ui.set_width(columns.utility_width);
+                            let size_txt = if row.rec.estimate {
+                                format!("≈{}", fmt_bytes(row.rec.bytes))
+                            } else {
+                                fmt_bytes(row.rec.bytes)
+                            };
+                            ui.label(
+                                RichText::new(size_txt)
+                                    .font(theme::mono(12.5))
+                                    .color(palette.ink)
+                                    .strong(),
+                            );
                             // action chip
                             let (chip_txt, chip_color, cyclable) =
                                 match (row.rec.action, row.action) {
@@ -1993,45 +2035,41 @@ impl App {
                                     (_, Action::Delete) => ("Erase", palette.danger, true),
                                     _ => ("?", palette.muted, false),
                                 };
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                let (chip, resp) =
-                                    ui.allocate_exact_size(vec2(64.0, 18.0), Sense::click());
-                                let p = ui.painter();
-                                p.rect_stroke(
-                                    chip,
-                                    Rounding::same(6.0),
-                                    Stroke::new(1.0, chip_color.gamma_multiply(0.55)),
-                                );
-                                p.text(
-                                    chip.center(),
-                                    Align2::CENTER_CENTER,
-                                    chip_txt,
-                                    theme::body(9.5),
-                                    chip_color,
-                                );
-                                if cyclable && resp.clicked() && !cleaning {
-                                    let allowed: Vec<Action> = [
-                                        (row.rec.allow_trash, Action::Trash),
-                                        (row.rec.allow_delete, Action::Delete),
-                                    ]
-                                    .iter()
-                                    .filter(|(ok, _)| *ok)
-                                    .map(|(_, a)| *a)
-                                    .collect();
-                                    if allowed.len() > 1 {
-                                        let pos = allowed
-                                            .iter()
-                                            .position(|a| *a == row.action)
-                                            .unwrap_or(0);
-                                        row.action = allowed[(pos + 1) % allowed.len()];
-                                    }
+                            let (chip, resp) =
+                                ui.allocate_exact_size(vec2(64.0, 18.0), Sense::click());
+                            let p = ui.painter();
+                            p.rect_stroke(
+                                chip,
+                                Rounding::same(6.0),
+                                Stroke::new(1.0, chip_color.gamma_multiply(0.55)),
+                            );
+                            p.text(
+                                chip.center(),
+                                Align2::CENTER_CENTER,
+                                chip_txt,
+                                theme::body(9.5),
+                                chip_color,
+                            );
+                            if cyclable && resp.clicked() && !cleaning {
+                                let allowed: Vec<Action> = [
+                                    (row.rec.allow_trash, Action::Trash),
+                                    (row.rec.allow_delete, Action::Delete),
+                                ]
+                                .iter()
+                                .filter(|(ok, _)| *ok)
+                                .map(|(_, a)| *a)
+                                .collect();
+                                if allowed.len() > 1 {
+                                    let pos =
+                                        allowed.iter().position(|a| *a == row.action).unwrap_or(0);
+                                    row.action = allowed[(pos + 1) % allowed.len()];
                                 }
-                                if cyclable {
-                                    resp.on_hover_text(
-                                        "click to switch between Trash and permanent erase",
-                                    );
-                                }
-                            });
+                            }
+                            if cyclable {
+                                resp.on_hover_text(
+                                    "click to switch between Trash and permanent erase",
+                                );
+                            }
                             // status
                             let status = match &row.status {
                                 RecStatus::Idle => None,
@@ -2047,20 +2085,14 @@ impl App {
                                 }
                             };
                             if let Some((txt, color)) = status {
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Min),
-                                    |ui| {
-                                        let resp = ui.label(
-                                            RichText::new(txt).font(theme::mono(9.5)).color(color),
-                                        );
-                                        if let RecStatus::Failed(msg) = &row.status {
-                                            resp.on_hover_text(msg);
-                                        }
-                                    },
-                                );
+                                let resp = ui
+                                    .label(RichText::new(txt).font(theme::mono(9.5)).color(color));
+                                if let RecStatus::Failed(msg) = &row.status {
+                                    resp.on_hover_text(msg);
+                                }
                             }
-                        });
-                    });
+                        },
+                    );
                 });
             });
         reveal
