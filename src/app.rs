@@ -2613,8 +2613,8 @@ impl App {
                                             );
                                             ui.label(
                                                 RichText::new(format!(
-                                                    "grew {} across {} scan interval(s) · {}",
-                                                    fmt_bytes(growth.bytes_delta),
+                                                    "net {} across {} growth interval(s) · {}",
+                                                    fmt_delta(growth.bytes_delta),
                                                     growth.positive_intervals,
                                                     fmt_percent_tenths(growth.percent_tenths)
                                                 ))

@@ -483,6 +483,16 @@ fn build_growth_watch(snapshots: &[Snapshot], watched_paths: &[PathBuf]) -> Grow
             }
         })
         .collect();
+    recurring.retain(|growth| growth.bytes_delta > 0);
+    let candidates = recurring.clone();
+    recurring.retain(|candidate| {
+        !candidates.iter().any(|other| {
+            other.path != candidate.path
+                && other.path.starts_with(&candidate.path)
+                && other.positive_intervals >= candidate.positive_intervals
+                && (other.bytes_delta as i128 * 100) >= (candidate.bytes_delta as i128 * 80)
+        })
+    });
     recurring.sort_by(|left, right| {
         right
             .positive_intervals
@@ -858,6 +868,37 @@ mod tests {
         assert_eq!(watch.recurring[0].positive_intervals, 1);
         assert_eq!(watch.recurring[0].bytes_delta, 15 * MB);
         assert_eq!(watch.recurring[0].percent_tenths, Some(750));
+    }
+
+    #[test]
+    fn recurring_growth_omits_net_negative_and_correlated_ancestor_noise() {
+        let root = PathBuf::from("/System/Volumes/Data");
+        let snapshots = vec![
+            Snapshot {
+                captured_at_ms: 10,
+                root: root.clone(),
+                total_bytes: 100 * MB,
+                entries: vec![
+                    entry("Users", 50 * MB),
+                    entry("Users/project", 45 * MB),
+                    entry("private", 40 * MB),
+                ],
+            },
+            Snapshot {
+                captured_at_ms: 20,
+                root: root,
+                total_bytes: 130 * MB,
+                entries: vec![
+                    entry("Users", 80 * MB),
+                    entry("Users/project", 73 * MB),
+                    entry("private", 20 * MB),
+                ],
+            },
+        ];
+        let watch = build_growth_watch(&snapshots, &[]);
+        assert_eq!(watch.recurring.len(), 1);
+        assert_eq!(watch.recurring[0].path, PathBuf::from("Users/project"));
+        assert_eq!(watch.recurring[0].bytes_delta, 28 * MB);
     }
 
     #[test]
