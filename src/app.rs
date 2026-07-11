@@ -426,6 +426,38 @@ struct WorkspaceLayout {
     rail: Rect,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MapItemActions {
+    open: bool,
+    reveal: bool,
+    move_to_ssd: bool,
+}
+
+fn map_item_actions(is_dir: bool, synthetic: bool, denied: bool, has_node: bool) -> MapItemActions {
+    let real = has_node && !synthetic;
+    MapItemActions {
+        open: real && is_dir && !denied,
+        reveal: real,
+        move_to_ssd: real,
+    }
+}
+
+fn map_item_hint(is_dir: bool, synthetic: bool, denied: bool) -> &'static str {
+    if synthetic {
+        "Combined smaller items"
+    } else if denied {
+        "Access unavailable · Grant Full Disk Access to inspect"
+    } else if is_dir {
+        "Click to open · Right-click for actions"
+    } else {
+        "Right-click for actions"
+    }
+}
+
+fn back_target(depth: usize) -> Option<usize> {
+    depth.checked_sub(1)
+}
+
 impl WorkspaceLayout {
     fn from_rect(full: Rect) -> Self {
         let overview = Rect::from_min_size(full.min, vec2(full.width(), 128.0));
@@ -472,6 +504,66 @@ mod tests {
         let app = App::new();
         assert!(!app.review_open);
         assert!(!app.activity_open);
+    }
+
+    #[test]
+    fn map_actions_match_real_synthetic_and_denied_items() {
+        assert_eq!(
+            map_item_actions(true, false, false, true),
+            MapItemActions {
+                open: true,
+                reveal: true,
+                move_to_ssd: true,
+            }
+        );
+        assert_eq!(
+            map_item_actions(false, false, false, true),
+            MapItemActions {
+                open: false,
+                reveal: true,
+                move_to_ssd: true,
+            }
+        );
+        assert_eq!(
+            map_item_actions(false, true, false, false),
+            MapItemActions {
+                open: false,
+                reveal: false,
+                move_to_ssd: false,
+            }
+        );
+        assert_eq!(
+            map_item_actions(true, false, true, true),
+            MapItemActions {
+                open: false,
+                reveal: true,
+                move_to_ssd: true,
+            }
+        );
+    }
+
+    #[test]
+    fn map_hints_explain_discoverable_actions_without_modifiers() {
+        assert_eq!(
+            map_item_hint(true, false, false),
+            "Click to open · Right-click for actions"
+        );
+        assert_eq!(
+            map_item_hint(false, false, false),
+            "Right-click for actions"
+        );
+        assert_eq!(map_item_hint(false, true, false), "Combined smaller items");
+        assert_eq!(
+            map_item_hint(true, false, true),
+            "Access unavailable · Grant Full Disk Access to inspect"
+        );
+    }
+
+    #[test]
+    fn back_target_is_one_level_and_inert_at_root() {
+        assert_eq!(back_target(0), None);
+        assert_eq!(back_target(1), Some(0));
+        assert_eq!(back_target(3), Some(2));
     }
 }
 
