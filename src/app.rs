@@ -5,8 +5,8 @@ use crate::clean::{
     fmt_bytes, fmt_count, open_full_disk_access, reveal_in_finder, run_clean, CleanEvent, CleanJob,
 };
 use crate::offload::{
-    can_confirm_offload, check_movable, external_volumes, has_room, run_offload, OffloadEvent,
-    OffloadJob, Volume,
+    can_confirm_offload, check_movable, classify_movable, external_volumes, has_room, run_offload,
+    OffloadEvent, OffloadJob, Volume,
 };
 use crate::rules::{self, strip_data_root, Action, Rec, Tier};
 use crate::scan::{disk_stats, start_scan, DiskStats, Node, ScanHandle, ScanState, DATA_ROOT};
@@ -435,12 +435,18 @@ struct MapItemActions {
     move_to_ssd: bool,
 }
 
-fn map_item_actions(is_dir: bool, synthetic: bool, denied: bool, has_node: bool) -> MapItemActions {
+fn map_item_actions(
+    is_dir: bool,
+    synthetic: bool,
+    denied: bool,
+    has_node: bool,
+    offload_allowed: bool,
+) -> MapItemActions {
     let real = has_node && !synthetic;
     MapItemActions {
         open: real && is_dir && !denied,
         reveal: real,
-        move_to_ssd: real,
+        move_to_ssd: real && offload_allowed,
     }
 }
 
@@ -539,7 +545,15 @@ mod tests {
     #[test]
     fn map_actions_match_real_synthetic_and_denied_items() {
         assert_eq!(
-            map_item_actions(true, false, false, true),
+            map_item_actions(true, false, false, true, false),
+            MapItemActions {
+                open: true,
+                reveal: true,
+                move_to_ssd: false,
+            }
+        );
+        assert_eq!(
+            map_item_actions(true, false, false, true, true),
             MapItemActions {
                 open: true,
                 reveal: true,
@@ -547,7 +561,7 @@ mod tests {
             }
         );
         assert_eq!(
-            map_item_actions(false, false, false, true),
+            map_item_actions(false, false, false, true, true),
             MapItemActions {
                 open: false,
                 reveal: true,
@@ -555,7 +569,7 @@ mod tests {
             }
         );
         assert_eq!(
-            map_item_actions(false, true, false, false),
+            map_item_actions(false, true, false, false, true),
             MapItemActions {
                 open: false,
                 reveal: false,
@@ -563,7 +577,7 @@ mod tests {
             }
         );
         assert_eq!(
-            map_item_actions(true, false, true, true),
+            map_item_actions(true, false, true, true, true),
             MapItemActions {
                 open: false,
                 reveal: true,
@@ -1286,6 +1300,9 @@ impl App {
         let mut requested_action: Option<MapActionRequest> = None;
         let mut menu_open = false;
         let mut menu_was_open = false;
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
 
         for &(idx, item_rect) in &laid {
             let item = &items[idx];
@@ -1294,13 +1311,17 @@ impl App {
                 ui.id().with(("treemap-item", idx)),
                 Sense::click(),
             );
+            let item_node = item.node.clone();
+            let offload_block = item_node
+                .as_ref()
+                .and_then(|node| classify_movable(&strip_data_root(&node.path), &home).err());
             let actions = map_item_actions(
                 item.is_dir,
                 item.synthetic,
                 item.denied,
                 item.node.is_some(),
+                offload_block.is_none(),
             );
-            let item_node = item.node.clone();
 
             let primary_clicked = response.clicked();
             let control_down = ui.input(|input| input.modifiers.ctrl);
@@ -1338,10 +1359,12 @@ impl App {
                     menu_ui.close_menu();
                 }
                 menu_ui.separator();
-                if menu_ui
-                    .add_enabled(actions.move_to_ssd, egui::Button::new("Move to SSD…"))
-                    .clicked()
-                {
+                let mut move_response =
+                    menu_ui.add_enabled(actions.move_to_ssd, egui::Button::new("Move to SSD…"));
+                if let Some(block) = offload_block {
+                    move_response = move_response.on_disabled_hover_text(block.message());
+                }
+                if move_response.clicked() {
                     requested_action = item_node.as_ref().map(|node| MapActionRequest::MoveToSsd {
                         path: strip_data_root(&node.path),
                         bytes: node.bytes(),
@@ -1692,6 +1715,10 @@ impl App {
         let cleaning = self.cleaning;
         let rec_real = strip_data_root(&self.recs[idx].rec.path);
         let rec_size = self.recs[idx].rec.bytes;
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let offload_block = classify_movable(&rec_real, &home).err();
         let row = &mut self.recs[idx];
         let (border, fill) = match (&row.status, row.checked) {
             (RecStatus::Running, _) => (palette.accent_dim(110), palette.surface_raised),
@@ -1792,18 +1819,23 @@ impl App {
                                 reveal = Some(row.rec.path.clone());
                             }
                             ui.add_space(2.0);
-                            if ui
-                                .add(
-                                    Label::new(
-                                        RichText::new("→ SSD")
-                                            .font(theme::mono(10.0))
-                                            .color(palette.muted),
-                                    )
-                                    .sense(Sense::click()),
+                            let mut offload_response = ui.add_enabled(
+                                offload_block.is_none(),
+                                Label::new(
+                                    RichText::new("→ SSD")
+                                        .font(theme::mono(10.0))
+                                        .color(palette.muted),
                                 )
-                                .on_hover_text("move this to an attached external drive")
-                                .clicked()
-                            {
+                                .sense(Sense::click()),
+                            );
+                            if let Some(block) = offload_block {
+                                offload_response =
+                                    offload_response.on_disabled_hover_text(block.message());
+                            } else {
+                                offload_response = offload_response
+                                    .on_hover_text("move this to an attached external drive");
+                            }
+                            if offload_response.clicked() {
                                 *offload_out = Some((rec_real.clone(), rec_size));
                             }
                         }
