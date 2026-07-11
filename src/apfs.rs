@@ -22,6 +22,9 @@ fn plist_integer(xml: &str, key: &str) -> Option<i64> {
 
 fn snapshot_count(xml: &str) -> Option<usize> {
     let tail = xml.split_once("<key>Snapshots</key>")?.1;
+    if tail.trim_start().starts_with("<array/>") {
+        return Some(0);
+    }
     let start = tail.find("<array>")? + "<array>".len();
     let end = tail[start..].find("</array>")? + start;
     Some(tail[start..end].matches("<dict>").count())
@@ -96,6 +99,10 @@ mod tests {
     fn counts_only_snapshot_dicts_inside_the_snapshot_array() {
         let xml = "<dict><key>Other</key><dict></dict><key>Snapshots</key><array><dict></dict><dict></dict></array><key>Tail</key><dict></dict></dict>";
         assert_eq!(snapshot_count(xml), Some(2));
+        assert_eq!(
+            snapshot_count("<dict><key>Snapshots</key><array/></dict>"),
+            Some(0)
+        );
         assert_eq!(snapshot_count("<dict></dict>"), None);
     }
 }
