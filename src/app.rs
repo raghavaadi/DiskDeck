@@ -2140,6 +2140,9 @@ impl App {
                     src: dlg.src.clone(),
                     mount_path: vol.mount_path.clone(),
                     leave_symlink: dlg.leave_symlink,
+                    home: std::env::var_os("HOME")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_default(),
                 },
                 tx,
             );

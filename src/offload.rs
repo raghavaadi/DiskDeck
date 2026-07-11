@@ -4,6 +4,7 @@
 
 use std::ffi::{CStr, CString};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::Sender;
 
@@ -266,6 +267,43 @@ pub struct MoveOutcome {
     pub symlinked: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+fn source_identity(path: &Path) -> Result<SourceIdentity, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect source before copy: {error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err("source became a symlink; original left intact".into());
+    }
+    Ok(SourceIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    })
+}
+
+fn ensure_source_unchanged(path: &Path, expected: SourceIdentity) -> Result<(), String> {
+    let current = source_identity(path)?;
+    if current != expected {
+        return Err("source changed during copy; original left intact".into());
+    }
+    Ok(())
+}
+
+fn check_destination_absent(dest: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(dest) {
+        Ok(_) => Err(format!(
+            "destination already exists at {}; original left intact",
+            dest.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("inspect destination before copy: {error}")),
+    }
+}
+
 /// Verified cross-volume move. Order is the safety contract:
 /// copy (ditto) → verify size → delete original → optional symlink → ledger.
 /// Any failure before the delete leaves `src` untouched.
@@ -275,6 +313,8 @@ pub fn perform_move(
     ledger_path: &Path,
     leave_symlink: bool,
 ) -> Result<MoveOutcome, String> {
+    check_destination_absent(dest)?;
+    let source_identity = source_identity(src)?;
     let total = quick_du(src);
     let src_apparent = apparent_size(src);
     if let Some(parent) = dest.parent() {
@@ -305,7 +345,8 @@ pub fn perform_move(
         ));
     }
 
-    // 3. delete original (only now)
+    // 3. confirm the original path still names the same inode, then delete.
+    ensure_source_unchanged(src, source_identity)?;
     delete_path(src)?;
 
     // 4. optional symlink at the origin, pointing at the new location
@@ -372,6 +413,7 @@ pub struct OffloadJob {
     pub src: PathBuf,
     pub mount_path: PathBuf,
     pub leave_symlink: bool,
+    pub home: PathBuf,
 }
 
 pub enum OffloadEvent {
@@ -389,21 +431,59 @@ pub enum OffloadEvent {
     },
 }
 
+fn check_target(mount_path: &Path, item_size: i64) -> Result<(), String> {
+    if !mount_path.is_absolute()
+        || has_dot_component(mount_path)
+        || !mount_path.starts_with("/Volumes")
+        || mount_path == Path::new("/Volumes")
+    {
+        return Err("target is not an attached external volume".into());
+    }
+    let metadata = std::fs::symlink_metadata(mount_path)
+        .map_err(|error| format!("inspect target volume: {error}"))?;
+    let Some((fs_type, read_only, free_bytes)) = statfs_info(mount_path) else {
+        return Err("target volume is no longer available".into());
+    };
+    if !eligible_volume(&fs_type, read_only, metadata.file_type().is_symlink()) {
+        return Err("target must be a writable local external volume".into());
+    }
+    if !has_room(item_size, free_bytes) {
+        return Err("target no longer has enough free space for this move".into());
+    }
+    Ok(())
+}
+
 /// Run one offload on a background thread, streaming events to the UI.
 pub fn run_offload(job: OffloadJob, tx: Sender<OffloadEvent>) {
     std::thread::Builder::new()
         .name("offload".into())
         .spawn(move || {
+            let total = match check_movable(&job.src, &job.home) {
+                Ok(()) => quick_du(&job.src),
+                Err(block) => {
+                    let _ = tx.send(OffloadEvent::Failed {
+                        error: block.message().to_owned(),
+                    });
+                    return;
+                }
+            };
+            if let Err(error) = check_target(&job.mount_path, total) {
+                let _ = tx.send(OffloadEvent::Failed { error });
+                return;
+            }
+
+            let dest = dest_for(&job.src, &job.mount_path);
+            if let Err(error) = check_destination_absent(&dest) {
+                let _ = tx.send(OffloadEvent::Failed { error });
+                return;
+            }
+
             let name = job
                 .src
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let _ = tx.send(OffloadEvent::Started {
-                name,
-                total: quick_du(&job.src),
-            });
-            let dest = dest_for(&job.src, &job.mount_path);
+            let _ = tx.send(OffloadEvent::Started { name, total });
             let ledger = job
                 .mount_path
                 .join("DiskDeck Offload")
@@ -613,6 +693,35 @@ mod tests {
     }
 
     #[test]
+    fn move_refuses_an_existing_destination_without_touching_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src.txt");
+        let dest = tmp.path().join("dest.txt");
+        let ledger = tmp.path().join("ledger.json");
+        fs::write(&src, b"source").unwrap();
+        fs::write(&dest, b"existing").unwrap();
+        let error = match perform_move(&src, &dest, &ledger, false) {
+            Err(error) => error,
+            Ok(_) => panic!("existing destination must be refused"),
+        };
+        assert!(error.contains("destination already exists"));
+        assert_eq!(fs::read(&src).unwrap(), b"source");
+        assert_eq!(fs::read(&dest).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn source_identity_detects_a_path_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src.txt");
+        let parked = tmp.path().join("parked.txt");
+        fs::write(&src, b"first").unwrap();
+        let identity = source_identity(&src).unwrap();
+        fs::rename(&src, &parked).unwrap();
+        fs::write(&src, b"second").unwrap();
+        assert!(ensure_source_unchanged(&src, identity).is_err());
+    }
+
+    #[test]
     fn symlink_move_leaves_a_link_at_the_origin() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src/data.txt");
@@ -636,35 +745,56 @@ mod tests {
     }
 
     #[test]
-    fn run_offload_emits_started_then_done() {
+    fn run_offload_rejects_a_protected_source_before_copying() {
         let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("Users/me/big.bin");
+        let home = tmp.path().join("home");
+        let src = home.join("Library/Caches/data.bin");
+        let mount = tmp.path().join("target");
         fs::create_dir_all(src.parent().unwrap()).unwrap();
-        fs::write(&src, vec![7u8; 4096]).unwrap();
+        fs::create_dir_all(&mount).unwrap();
+        fs::write(&src, b"keep me").unwrap();
 
         let (tx, rx) = std::sync::mpsc::channel();
         run_offload(
             OffloadJob {
                 src: src.clone(),
-                mount_path: tmp.path().join("vol"),
+                mount_path: mount,
                 leave_symlink: false,
+                home,
             },
             tx,
         );
+        assert!(matches!(
+            rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap(),
+            OffloadEvent::Failed { .. }
+        ));
+        assert_eq!(fs::read(src).unwrap(), b"keep me");
+    }
 
-        let mut saw_started = false;
-        let mut saw_done = false;
-        while let Ok(ev) = rx.recv() {
-            match ev {
-                OffloadEvent::Started { .. } => saw_started = true,
-                OffloadEvent::Done { .. } => {
-                    saw_done = true;
-                    break;
-                }
-                OffloadEvent::Failed { error } => panic!("unexpected failure: {error}"),
-            }
-        }
-        assert!(saw_started && saw_done);
-        assert!(!src.exists());
+    #[test]
+    fn run_offload_rejects_a_target_outside_volumes_before_copying() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let src = home.join("Movies/data.bin");
+        let mount = tmp.path().join("target");
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::create_dir_all(&mount).unwrap();
+        fs::write(&src, b"keep me").unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        run_offload(
+            OffloadJob {
+                src: src.clone(),
+                mount_path: mount,
+                leave_symlink: false,
+                home,
+            },
+            tx,
+        );
+        assert!(matches!(
+            rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap(),
+            OffloadEvent::Failed { .. }
+        ));
+        assert_eq!(fs::read(src).unwrap(), b"keep me");
     }
 }
