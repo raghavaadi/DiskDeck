@@ -4,6 +4,7 @@ mod apfs;
 mod app;
 mod clean;
 mod developer;
+mod file_review;
 mod history;
 mod leftovers;
 mod monitor;

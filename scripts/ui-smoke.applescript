@@ -154,6 +154,14 @@ on run argv
                 delay 0.5
                 if not (exists button "← Insights" of appGroup) then error "Menu-bar monitor rail did not open." number 1
                 return "PASS: Menu-bar monitor rail available"
+            else if commandName is "file-review-visible" then
+                my openInsights(appGroup)
+                if not (exists button "Duplicate & large-old review" of appGroup) then error "File review control is unavailable." number 1
+                click button "Duplicate & large-old review" of appGroup
+                delay 0.5
+                if not (exists button "← Insights" of appGroup) then error "File review rail did not open." number 1
+                if not (exists button "Start review scan" of appGroup) then error "Opt-in review control is unavailable." number 1
+                return "PASS: File review rail available without starting"
             else if commandName is "escape" then
                 key code 53
                 return "PASS: Escape sent"
@@ -166,7 +174,7 @@ on run argv
                 if afterSignature is beforeSignature then error "Back did not change the breadcrumb." number 1
                 return "PASS: Back navigation"
             else
-                error "Usage: ui-smoke.applescript check|signature|tile-center|menu-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|escape|back" number 1
+                error "Usage: ui-smoke.applescript check|signature|tile-center|menu-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
             end if
         end tell
     end tell

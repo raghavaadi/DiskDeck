@@ -56,4 +56,6 @@ ui app-leftovers-visible
 ui escape
 ui menu-monitor-visible
 ui escape
+ui file-review-visible
+ui escape
 echo "signed UI smoke check passed"

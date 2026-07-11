@@ -6,6 +6,7 @@ use crate::clean::{
     fmt_bytes, fmt_count, open_full_disk_access, reveal_in_finder, run_clean, CleanEvent, CleanJob,
 };
 use crate::developer;
+use crate::file_review::{self, ReviewResult};
 use crate::history::{
     default_history_dir, load_growth_watch, record_scan, set_folder_watched, GrowthSummary,
     GrowthWatch, HistoryEvent, TimelinePoint,
@@ -91,6 +92,7 @@ enum RailView {
     Apfs,
     Leftovers,
     Monitor,
+    FileReview,
 }
 
 fn rail_back_target(view: RailView) -> Option<RailView> {
@@ -102,7 +104,8 @@ fn rail_back_target(view: RailView) -> Option<RailView> {
         | RailView::Developer
         | RailView::Apfs
         | RailView::Leftovers
-        | RailView::Monitor => Some(RailView::Insights),
+        | RailView::Monitor
+        | RailView::FileReview => Some(RailView::Insights),
     }
 }
 
@@ -157,6 +160,10 @@ pub struct App {
     monitor_updated_at: Instant,
     monitor_low: bool,
     monitor_error: Option<String>,
+    file_review_rx: Option<Receiver<Result<ReviewResult, String>>>,
+    file_review_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    file_review: Option<ReviewResult>,
+    file_review_error: Option<String>,
 }
 
 fn now_hms() -> String {
@@ -329,6 +336,10 @@ impl App {
             monitor_updated_at: Instant::now(),
             monitor_low,
             monitor_error,
+            file_review_rx: None,
+            file_review_cancel: None,
+            file_review: None,
+            file_review_error: None,
         }
     }
 
@@ -719,6 +730,65 @@ impl App {
         }
         self.monitor_low = low;
         self.monitor_updated_at = Instant::now();
+    }
+
+    fn begin_file_review(&mut self) {
+        if self.file_review_rx.is_some() {
+            return;
+        }
+        let roots = file_review::standard_roots(&Self::home_dir());
+        if roots.is_empty() {
+            self.file_review_error =
+                Some("No standard user folders are available to review".into());
+            return;
+        }
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        match file_review::run(roots, cancel.clone(), tx) {
+            Ok(()) => {
+                self.file_review_rx = Some(rx);
+                self.file_review_cancel = Some(cancel);
+                self.file_review = None;
+                self.file_review_error = None;
+                self.ops(OpsKind::Info, "opt-in file review started — read-only");
+            }
+            Err(error) => self.file_review_error = Some(error),
+        }
+    }
+
+    fn poll_file_review(&mut self) {
+        let result = match self.file_review_rx.as_ref().map(Receiver::try_recv) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Some(Err("file-review worker stopped before reporting".into()))
+            }
+        };
+        self.file_review_rx = None;
+        self.file_review_cancel = None;
+        match result.unwrap() {
+            Ok(result) => {
+                self.ops(
+                    OpsKind::Info,
+                    format!(
+                        "file review complete — {} files, {} duplicate groups, {} large-old files",
+                        fmt_count(result.files_visited as i64),
+                        result.duplicate_groups.len(),
+                        result.large_old.len()
+                    ),
+                );
+                self.file_review = Some(result);
+                self.file_review_error = None;
+            }
+            Err(error) if error == "file review cancelled" => {
+                self.file_review_error = None;
+                self.ops(OpsKind::Dim, "file review cancelled");
+            }
+            Err(error) => {
+                self.file_review_error = Some(error.clone());
+                self.ops(OpsKind::Amber, format!("file review unavailable — {error}"));
+            }
+        }
     }
 
     fn poll_clean_events(&mut self) {
@@ -1175,6 +1245,10 @@ mod tests {
             rail_back_target(RailView::Monitor),
             Some(RailView::Insights)
         );
+        assert_eq!(
+            rail_back_target(RailView::FileReview),
+            Some(RailView::Insights)
+        );
     }
 
     #[test]
@@ -1474,6 +1548,7 @@ impl eframe::App for App {
         self.poll_growth_watch();
         self.poll_apfs();
         self.poll_leftovers();
+        self.poll_file_review();
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             if self.restore_dialog.take().is_some() {
                 self.restore_hold = 0.0;
@@ -1501,6 +1576,7 @@ impl eframe::App for App {
             || self.growth_watch_rx.is_some()
             || self.apfs_rx.is_some()
             || self.leftovers_rx.is_some()
+            || self.file_review_rx.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(40));
         }
@@ -2197,6 +2273,10 @@ impl App {
                 self.draw_menu_monitor(ui, rect);
                 return;
             }
+            RailView::FileReview => {
+                self.draw_file_review(ui, rect);
+                return;
+            }
             RailView::Reclaim => {}
         }
 
@@ -2542,6 +2622,11 @@ impl App {
                     "Off · opt in explicitly".into()
                 },
                 RailView::Monitor,
+            ),
+            (
+                "Duplicate & large-old review",
+                "Off · starts only when you ask".into(),
+                RailView::FileReview,
             ),
         ];
         let mut open = None;
@@ -3535,6 +3620,221 @@ impl App {
         });
         if changed {
             self.apply_monitor_settings(next);
+        }
+    }
+
+    fn draw_file_review(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let meta = self
+            .file_review
+            .as_ref()
+            .map(|result| format!("{} files reviewed", fmt_count(result.files_visited as i64)))
+            .unwrap_or_else(|| {
+                if self.file_review_rx.is_some() {
+                    "reviewing…".into()
+                } else {
+                    "opt-in · off".into()
+                }
+            });
+        let content = panel_chrome(
+            ui,
+            rect,
+            "Duplicate & large-old review",
+            Some((meta, palette.faint)),
+        );
+        let nav = Rect::from_min_size(
+            content.min + vec2(10.0, 4.0),
+            vec2(content.width() - 20.0, 30.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(nav), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("← Insights")
+                            .font(theme::display_md(10.5))
+                            .color(palette.accent),
+                    )
+                    .frame(false),
+                )
+                .clicked()
+            {
+                self.rail_view = RailView::Insights;
+            }
+        });
+        let body = Rect::from_min_max(
+            pos2(content.min.x + 10.0, nav.max.y + 6.0),
+            pos2(content.max.x - 10.0, content.max.y - 4.0),
+        );
+        let mut start = false;
+        let mut cancel = false;
+        let mut reveal = None;
+        let mut quick_look = None;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(body), |ui| {
+            ui.label(
+                RichText::new(
+                    "Read-only scan of standard user folders. It skips Library, hidden folders, symlinks, node_modules, and app/media-library bundles.",
+                )
+                .font(theme::body(9.5))
+                .color(palette.muted),
+            );
+            ui.add_space(8.0);
+            if self.file_review_rx.is_some() {
+                ui.label(
+                    RichText::new("Comparing candidate files byte-for-byte…")
+                        .font(theme::body(10.0))
+                        .color(palette.accent),
+                );
+                cancel = ui.button("Cancel review").clicked();
+                return;
+            }
+            if self.file_review.is_none() {
+                ui.label(
+                    RichText::new(
+                        "Nothing starts automatically. Results have Quick Look and Reveal only—no delete or move action.",
+                    )
+                    .font(theme::body(9.5))
+                    .color(palette.faint),
+                );
+                ui.add_space(8.0);
+                start = ui
+                    .add(egui::Button::new(
+                        RichText::new("Start review scan")
+                            .font(theme::display_md(10.5))
+                            .color(palette.accent),
+                    ))
+                    .clicked();
+                if let Some(error) = &self.file_review_error {
+                    ui.label(RichText::new(error).font(theme::body(9.5)).color(palette.danger));
+                }
+                return;
+            }
+            let result = self.file_review.as_ref().unwrap();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "EXACT DUPLICATES · {} GROUPS",
+                                result.duplicate_groups.len()
+                            ))
+                            .font(theme::display_md(9.5))
+                            .color(palette.caution),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            start = ui.small_button("Run again").clicked();
+                        });
+                    });
+                    if result.duplicate_groups.is_empty() {
+                        ui.label(RichText::new("No exact duplicate group met the 10 MB floor.").font(theme::body(9.0)).color(palette.faint));
+                    }
+                    for group in &result.duplicate_groups {
+                        Frame::none()
+                            .fill(palette.surface)
+                            .stroke(Stroke::new(1.0, palette.edge_soft))
+                            .rounding(Rounding::same(8.0))
+                            .inner_margin(Margin::symmetric(9.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} exact copies · {} each · {} duplicated",
+                                        group.paths.len(),
+                                        fmt_bytes(group.bytes_each),
+                                        fmt_bytes(group.wasted_bytes)
+                                    ))
+                                    .font(theme::body(9.5))
+                                    .color(palette.ink),
+                                );
+                                for path in group.paths.iter().take(5) {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(tail_str(&path.display().to_string(), 33))
+                                                .font(theme::mono(8.5))
+                                                .color(palette.muted),
+                                        );
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui.small_button("Reveal").clicked() {
+                                                reveal = Some(path.clone());
+                                            }
+                                            if ui.small_button("Quick Look").clicked() {
+                                                quick_look = Some(path.clone());
+                                            }
+                                        });
+                                    });
+                                }
+                                ui.label(
+                                    RichText::new("All copies are preserved; DiskDeck does not choose one for deletion.")
+                                        .font(theme::body(8.5))
+                                        .color(palette.safe),
+                                );
+                            });
+                        ui.add_space(6.0);
+                    }
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format!("LARGE & OLD · {} FILES", result.large_old.len()))
+                            .font(theme::display_md(9.5))
+                            .color(palette.caution),
+                    );
+                    ui.label(
+                        RichText::new("Uses macOS last-access metadata, which may be coarse or disabled on some volumes.")
+                            .font(theme::body(8.5))
+                            .color(palette.faint),
+                    );
+                    let now = unsafe { libc::time(std::ptr::null_mut()) };
+                    for file in &result.large_old {
+                        let days = now.saturating_sub(file.accessed_at) / (24 * 60 * 60);
+                        Frame::none()
+                            .fill(palette.surface)
+                            .stroke(Stroke::new(1.0, palette.edge_soft))
+                            .rounding(Rounding::same(8.0))
+                            .inner_margin(Margin::symmetric(9.0, 7.0))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(
+                                    RichText::new(tail_str(&file.path.display().to_string(), 38))
+                                        .font(theme::mono(9.0))
+                                        .color(palette.ink),
+                                );
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(format!("{} · accessed ~{days} days ago", fmt_bytes(file.bytes)))
+                                            .font(theme::body(8.5))
+                                            .color(palette.muted),
+                                    );
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.small_button("Reveal").clicked() { reveal = Some(file.path.clone()); }
+                                        if ui.small_button("Quick Look").clicked() { quick_look = Some(file.path.clone()); }
+                                    });
+                                });
+                            });
+                        ui.add_space(5.0);
+                    }
+                });
+        });
+        if start {
+            self.begin_file_review();
+        }
+        if cancel {
+            if let Some(flag) = &self.file_review_cancel {
+                flag.store(true, Relaxed);
+            }
+        }
+        if let Some(path) = reveal {
+            reveal_in_finder(&path);
+        }
+        if let Some(path) = quick_look {
+            if let Err(error) = std::process::Command::new("/usr/bin/qlmanage")
+                .arg("-p")
+                .arg(&path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                self.ops(OpsKind::Amber, format!("Quick Look unavailable — {error}"));
+            }
         }
     }
 

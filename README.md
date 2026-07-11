@@ -38,6 +38,10 @@ compiler proves there are no data races.
 - **Optional menu-bar monitor** — show free space with five-minute updates and
   a local low-space threshold without running scans. Menu-bar display and
   launch at login are separate opt-ins and both default off.
+- **Opt-in duplicate and large-old review** — scan standard user folders only
+  when requested, prove duplicate groups byte-for-byte, and surface ≥1 GB
+  files with access metadata older than 180 days. Results provide Quick Look
+  and Finder reveal only; no copy is selected or removed.
 - **DaisyDisk-style zoom** — drilling into a region animates it expanding to
   fill the view. A visible Back button and clickable breadcrumbs make the
   route home obvious.
@@ -168,6 +172,7 @@ point) but are never suggested for deletion.
 | click APFS accounting in Insights | inspect container capacity and snapshot accounting |
 | click App leftovers in Insights | inspect evidence-backed sandbox leftovers; reveal only |
 | click Menu-bar monitor in Insights | opt into the native readout, threshold, or login launch |
+| click Duplicate & large-old review in Insights | open the off-by-default review; Start explicitly |
 | click Watch / Unwatch | update the local folder watchlist |
 | click Restore to Mac… | review why an item can or cannot be restored |
 | hold restore button 0.9 s | restore one acknowledged, preflighted item |
@@ -211,6 +216,7 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 | `apfs.rs` | fixed-command APFS plist parsing, bounded values, snapshot count, and timeout/failure behavior |
 | `leftovers.rs` | bundle-ID policy, ≥250 MB floor, exact installed-app absence proof, conservative omission |
 | `monitor.rs` | versioned settings, native AppKit status item, threshold semantics, user LaunchAgent |
+| `file_review.rs` | bounded opt-in traversal, hardlink dedup, streamed fingerprint plus byte proof, large-old metadata |
 | `transfer.rs` | shared collision, filesystem-identity, apparent-size, and verified-copy primitives |
 | `offload.rs` | protected-path policy, worker revalidation, destination collision, source identity, capacity margin, verified moves, symlink behavior, local move-record persistence, event ordering |
 | `moves.rs` | lossless registry codec, atomic bounded storage, legacy-ledger import, health classification, restore preflight, rollback, and worker events |
