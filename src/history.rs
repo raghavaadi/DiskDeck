@@ -430,9 +430,7 @@ fn build_growth_watch(snapshots: &[Snapshot], watched_paths: &[PathBuf]) -> Grow
     #[derive(Clone, Copy)]
     struct Aggregate {
         positive_intervals: usize,
-        bytes_delta: i64,
         first_before: i64,
-        current_bytes: i64,
     }
     let mut aggregates: HashMap<PathBuf, Aggregate> = HashMap::new();
     for pair in snapshots.windows(2) {
@@ -452,26 +450,37 @@ fn build_growth_watch(snapshots: &[Snapshot], watched_paths: &[PathBuf]) -> Grow
                 .entry(entry.path.clone())
                 .and_modify(|aggregate| {
                     aggregate.positive_intervals += 1;
-                    aggregate.bytes_delta = aggregate.bytes_delta.saturating_add(delta);
-                    aggregate.current_bytes = entry.bytes;
                 })
                 .or_insert(Aggregate {
                     positive_intervals: 1,
-                    bytes_delta: delta,
                     first_before: before,
-                    current_bytes: entry.bytes,
                 });
         }
     }
+    let latest: HashMap<&Path, i64> = snapshots
+        .last()
+        .map(|snapshot| {
+            snapshot
+                .entries
+                .iter()
+                .filter(|entry| entry.is_dir)
+                .map(|entry| (entry.path.as_path(), entry.bytes))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut recurring: Vec<RecurringGrowth> = aggregates
         .into_iter()
-        .map(|(path, aggregate)| RecurringGrowth {
-            watched: watched_paths.contains(&path),
-            path,
-            positive_intervals: aggregate.positive_intervals,
-            bytes_delta: aggregate.bytes_delta,
-            current_bytes: aggregate.current_bytes,
-            percent_tenths: percentage_tenths(aggregate.first_before, aggregate.bytes_delta),
+        .map(|(path, aggregate)| {
+            let current_bytes = latest.get(path.as_path()).copied().unwrap_or(0);
+            let bytes_delta = current_bytes.saturating_sub(aggregate.first_before);
+            RecurringGrowth {
+                watched: watched_paths.contains(&path),
+                path,
+                positive_intervals: aggregate.positive_intervals,
+                bytes_delta,
+                current_bytes,
+                percent_tenths: percentage_tenths(aggregate.first_before, bytes_delta),
+            }
         })
         .collect();
     recurring.sort_by(|left, right| {
@@ -820,6 +829,35 @@ mod tests {
         assert_eq!(watch.recurring[0].percent_tenths, Some(1500));
         assert!(watch.recurring[0].watched);
         assert_eq!(watch.watched[0].points.len(), 3);
+    }
+
+    #[test]
+    fn recurring_growth_reports_net_change_after_a_later_shrink() {
+        let root = PathBuf::from("/System/Volumes/Data");
+        let snapshots = vec![
+            Snapshot {
+                captured_at_ms: 10,
+                root: root.clone(),
+                total_bytes: 20 * MB,
+                entries: vec![entry("Users/project", 20 * MB)],
+            },
+            Snapshot {
+                captured_at_ms: 20,
+                root: root.clone(),
+                total_bytes: 50 * MB,
+                entries: vec![entry("Users/project", 50 * MB)],
+            },
+            Snapshot {
+                captured_at_ms: 30,
+                root,
+                total_bytes: 35 * MB,
+                entries: vec![entry("Users/project", 35 * MB)],
+            },
+        ];
+        let watch = build_growth_watch(&snapshots, &[]);
+        assert_eq!(watch.recurring[0].positive_intervals, 1);
+        assert_eq!(watch.recurring[0].bytes_delta, 15 * MB);
+        assert_eq!(watch.recurring[0].percent_tenths, Some(750));
     }
 
     #[test]
