@@ -161,11 +161,14 @@ Enable the tracked privacy and secret guard once per clone:
 ```sh
 git config core.hooksPath .githooks
 scripts/test-pre-commit.sh
+scripts/test-pre-push.sh
 ```
 
 The hook rejects credential-shaped strings, private keys, unapproved email
 addresses, machine-specific absolute paths, AppleDouble metadata, `.env`
-files, app bundles, and generated build output.
+files, app bundles, and generated build output. Before personal GitHub pushes,
+it also rejects BuddyHQ-authored commit history so local archive branches
+cannot be published accidentally.
 
 ## Project history
 

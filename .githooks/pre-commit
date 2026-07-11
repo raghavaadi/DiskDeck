@@ -51,7 +51,7 @@ grep -Eo '[[:alnum:]._%+-]+@[[:alnum:].-]+\.[[:alpha:]]{2,}' "$TMP/added" \
     | sort -u > "$TMP/emails" || true
 while IFS= read -r email; do
     case "$email" in
-        aadithyaraghav@gmail.com|omnibus.type@gmail.com|*@example.com)
+        aadithyaraghav@gmail.com|omnibus.type@gmail.com|git@github.com|git@bitbucket.org|*@example.com)
             ;;
         *)
             echo "pre-commit: staged content contains an unapproved email address: $email" >&2

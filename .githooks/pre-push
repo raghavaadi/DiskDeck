@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+remote_name=${1:-}
+remote_url=${2:-}
+
+case "$remote_url" in
+    git@github.com:raghavaadi/DiskDeck.git|https://github.com/raghavaadi/DiskDeck.git)
+        ;;
+    *)
+        exit 0
+        ;;
+esac
+
+zero=0000000000000000000000000000000000000000
+tmp=$(mktemp "${TMPDIR:-/tmp}/diskdeck-pre-push.XXXXXX")
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+tab=$(printf '\t')
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "${local_sha:-}" ] || continue
+    [ "$local_sha" != "$zero" ] || continue
+
+    git log --format='%H%x09%ae%x09%ce' "$local_sha" > "$tmp"
+    while IFS="$tab" read -r commit author_email committer_email; do
+        for email in "$author_email" "$committer_email"; do
+            normalized=$(printf '%s' "$email" | tr '[:upper:]' '[:lower:]')
+            case "$normalized" in
+                *@"buddyhq."ai)
+                    echo "pre-push: refusing $local_ref → $remote_ref on $remote_name" >&2
+                    echo "pre-push: commit $commit contains work identity $email" >&2
+                    echo "pre-push: personal GitHub history must not contain BuddyHQ commit metadata" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+    done < "$tmp"
+done
+
+echo "pre-push: personal GitHub history passed identity checks"

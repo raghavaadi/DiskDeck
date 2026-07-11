@@ -111,12 +111,21 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
   fixture dirs you created. Never test `delete`/`command` on the owner's
   real data.
 
+## Public repository and commit hygiene
+
+- Publish with `aadithyaraghav@gmail.com`, never a work or Bitbucket identity.
+- Enable tracked hooks with `git config core.hooksPath .githooks`.
+- Run both `scripts/test-pre-commit.sh` and `scripts/test-pre-push.sh`; the
+  latter prevents local BuddyHQ-authored archive history from reaching the
+  personal GitHub repository.
+
 ## Repo conventions
 
 - Flat module layout (`scan/rules/clean/treemap/theme/app`), one concern per
   file. No new crate dependencies without strong reason.
-- The aesthetic ("flight-deck instrument panel") is a feature: amber/cyan
-  palette, Saira Condensed caps, HUD corner brackets, glow arcs. Keep it.
+- The approved aesthetic is Adaptive Native: crisp macOS light mode, calm
+  Storage Observatory dark mode, a map-first hierarchy, and semantic colors
+  (mint=safe, amber=review, red=danger, cyan=navigation/scanning).
 - Parked v2 ideas: regrowth tracking between scans (owner's #1 want), Docker
   deep-dive panel, APFS snapshot/purgeable accounting, app-leftover
   detection, menu-bar free-space readout.

@@ -49,6 +49,12 @@ printf '%s\n' 'scan_root=/System/Volumes/Data, not /' > "$repo/config.txt"
 git -C "$repo" add config.txt
 expect_pass "$repo"
 
+new_repo git_ssh_urls
+printf '%s\n' 'git@github.com:raghavaadi/DiskDeck.git' \
+    'git@bitbucket.org:buddyhq/headroom-rs.git' > "$repo/remotes.txt"
+git -C "$repo" add remotes.txt
+expect_pass "$repo"
+
 new_repo credential
 printf '%s%s\n' 'github_' 'pat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' > "$repo/config.txt"
 git -C "$repo" add config.txt

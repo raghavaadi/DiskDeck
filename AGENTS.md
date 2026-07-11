@@ -123,15 +123,22 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
   machine-specific `/Users/...` and `/Volumes/...` paths.
 - Enable the tracked guard once per clone with
   `git config core.hooksPath .githooks`.
-- Run `scripts/test-pre-commit.sh` after changing the guard. The guard must
-  pass before every commit; never bypass it with `--no-verify`.
+- The pre-commit hook rejects sensitive content and generated artifacts. The
+  pre-push hook additionally rejects any BuddyHQ-authored commit history from
+  the personal `raghavaadi/DiskDeck` GitHub remote, preventing an accidental
+  `git push --all` from publishing local archive branches.
+- Run `scripts/test-pre-commit.sh` and `scripts/test-pre-push.sh` after changing
+  either guard. Both must pass before publishing; never bypass them with
+  `--no-verify`.
 
 ## Repo conventions
 
 - Flat module layout (`scan/rules/clean/treemap/theme/app`), one concern per
   file. No new crate dependencies without strong reason.
-- The aesthetic ("flight-deck instrument panel") is a feature: amber/cyan
-  palette, Saira Condensed caps, HUD corner brackets, glow arcs. Keep it.
+- The approved aesthetic is **Adaptive Native**: a crisp, familiar macOS light
+  appearance and a calm Storage Observatory dark appearance. The live storage
+  map is the signature surface; surrounding chrome stays quiet. Color is
+  semantic: mint=safe, amber=review, red=danger, cyan=navigation/scanning.
 - Parked v2 ideas: regrowth tracking between scans (owner's #1 want), Docker
   deep-dive panel, APFS snapshot/purgeable accounting, app-leftover
   detection, menu-bar free-space readout.
