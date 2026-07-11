@@ -89,10 +89,13 @@ the owner's real data.
 
 Add `moves.rs` as the focused owner of move records, the binary codec, local
 registry I/O, record reconciliation, filesystem state classification, restore
-preflight, and the restore worker. `offload.rs` continues to own outbound move
-policy and mechanics, but reports a complete move record for local persistence.
-`app.rs` owns the Moved items rail and confirmation sheet and consumes worker
-events through channels, matching scan, history, clean, and offload patterns.
+preflight, and the restore worker. Add `transfer.rs` for the neutral primitives
+shared by offload and restore: apparent-size measurement, path identity,
+identity rechecks, collision checks, and verified `ditto` copy. `offload.rs`
+continues to own outbound policy and ordering; `moves.rs` owns restore policy
+and ordering. `app.rs` owns the Moved items rail and confirmation sheet and
+consumes worker events through channels, matching scan, history, clean, and
+offload patterns.
 
 No new crate dependency is introduced. Standard library filesystem APIs,
 existing `libc` disk statistics, and `/usr/bin/ditto` are sufficient.
