@@ -458,6 +458,18 @@ fn back_target(depth: usize) -> Option<usize> {
     depth.checked_sub(1)
 }
 
+enum MapActionRequest {
+    Open {
+        node: Arc<Node>,
+        source: Rect,
+    },
+    Reveal(std::path::PathBuf),
+    MoveToSsd {
+        path: std::path::PathBuf,
+        bytes: i64,
+    },
+}
+
 impl WorkspaceLayout {
     fn from_rect(full: Rect) -> Self {
         let overview = Rect::from_min_size(full.min, vec2(full.width(), 128.0));
@@ -1097,19 +1109,15 @@ impl App {
     fn draw_map(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let palette = theme::palette(ui.ctx());
         let depth = self.crumbs.len();
-        let hint = if depth > 0 {
-            Some(("right-click or esc = back".to_string(), palette.faint))
-        } else {
-            self.scan.as_ref().map(|scan| {
-                (
-                    format!("{} items mapped", fmt_count(scan.root.files())),
-                    palette.faint,
-                )
-            })
-        };
+        let hint = self.scan.as_ref().map(|scan| {
+            (
+                format!("{} items mapped", fmt_count(scan.root.files())),
+                palette.faint,
+            )
+        });
         let content = panel_chrome(ui, rect, "Storage map", hint);
 
-        // ── clickable breadcrumb trail + UP button ──
+        // Clickable breadcrumb trail plus a persistent, root-safe Back button.
         let crumb_rect = Rect::from_min_size(
             content.min + vec2(12.0, 3.0),
             vec2(content.width() - 24.0, 24.0),
@@ -1156,28 +1164,34 @@ impl App {
                         go_to = Some(i + 1);
                     }
                 }
-                if depth > 0 {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let up = ui.add(
-                            egui::Button::new(
-                                RichText::new("↑ Up")
-                                    .font(theme::body(11.0))
-                                    .color(palette.accent),
-                            )
-                            .fill(palette.accent_dim(16))
-                            .stroke(Stroke::new(1.0, palette.accent_dim(90)))
-                            .rounding(Rounding::same(6.0)),
-                        );
-                        if up
-                            .on_hover_text(
-                                "back to the previous level (right-click or Esc also works)",
-                            )
-                            .clicked()
-                        {
-                            go_to = Some(depth - 1);
-                        }
-                    });
-                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let back = ui.add_enabled(
+                        depth > 0,
+                        egui::Button::new(RichText::new("← Back").font(theme::body(11.0)).color(
+                            if depth > 0 {
+                                palette.accent
+                            } else {
+                                palette.faint
+                            },
+                        ))
+                        .fill(palette.accent_dim(if depth > 0 { 16 } else { 0 }))
+                        .stroke(Stroke::new(
+                            1.0,
+                            if depth > 0 {
+                                palette.accent_dim(90)
+                            } else {
+                                palette.edge_soft
+                            },
+                        ))
+                        .rounding(Rounding::same(6.0)),
+                    );
+                    if back
+                        .on_hover_text("Return to the previous folder")
+                        .clicked()
+                    {
+                        go_to = back_target(depth);
+                    }
+                });
             });
         });
         if let Some(d) = go_to {
@@ -1197,8 +1211,6 @@ impl App {
             return;
         };
 
-        // back navigation strip (click crumb area): simple "↑ UP" zone
-        let resp = ui.interact(map_rect, ui.id().with("treemap"), Sense::click());
         let items = treemap::collect_items(&node);
         if items.is_empty() {
             let msg = if self.scanning() {
@@ -1229,16 +1241,79 @@ impl App {
             self.zoom = None;
         }
 
-        let hover = resp.hover_pos();
+        let interactions_enabled = zoom.is_none();
+        let hover = ui
+            .input(|input| input.pointer.hover_pos())
+            .filter(|position| map_rect.contains(*position));
         let hovered = treemap::paint(ui, map_rect, &items, &laid, hover, zoom);
+        let mut requested_action: Option<MapActionRequest> = None;
+        let mut menu_open = false;
 
-        // interactions
-        if let Some(idx) = hovered {
+        for &(idx, item_rect) in &laid {
+            let item = &items[idx];
+            let response = ui.interact(
+                item_rect,
+                ui.id().with(("treemap-item", idx)),
+                Sense::click(),
+            );
+            let actions = map_item_actions(
+                item.is_dir,
+                item.synthetic,
+                item.denied,
+                item.node.is_some(),
+            );
+            let item_node = item.node.clone();
+
+            if interactions_enabled && response.clicked() && actions.open {
+                if let Some(node) = item_node.clone() {
+                    requested_action = Some(MapActionRequest::Open {
+                        node,
+                        source: item_rect,
+                    });
+                }
+            }
+
+            response.context_menu(|menu_ui| {
+                menu_ui.set_min_width(180.0);
+                if menu_ui
+                    .add_enabled(actions.open, egui::Button::new("Open"))
+                    .clicked()
+                {
+                    requested_action = item_node.clone().map(|node| MapActionRequest::Open {
+                        node,
+                        source: item_rect,
+                    });
+                    menu_ui.close_menu();
+                }
+                if menu_ui
+                    .add_enabled(actions.reveal, egui::Button::new("Reveal in Finder"))
+                    .clicked()
+                {
+                    requested_action = item_node
+                        .as_ref()
+                        .map(|node| MapActionRequest::Reveal(node.path.clone()));
+                    menu_ui.close_menu();
+                }
+                menu_ui.separator();
+                if menu_ui
+                    .add_enabled(actions.move_to_ssd, egui::Button::new("Move to SSD…"))
+                    .clicked()
+                {
+                    requested_action = item_node.as_ref().map(|node| MapActionRequest::MoveToSsd {
+                        path: strip_data_root(&node.path),
+                        bytes: node.bytes(),
+                    });
+                    menu_ui.close_menu();
+                }
+            });
+            menu_open |= response.context_menu_opened();
+        }
+
+        if let Some(idx) = hovered.filter(|_| !menu_open) {
             let it = &items[idx];
-            // tooltip
             egui::Area::new(ui.id().with("tm_tt"))
                 .order(egui::Order::Tooltip)
-                .interactable(false) // must never swallow clicks meant for the map
+                .interactable(false)
                 .fixed_pos(hover.unwrap_or(map_rect.center()) + vec2(16.0, 18.0))
                 .show(ui.ctx(), |tui| {
                     Frame::none()
@@ -1247,9 +1322,18 @@ impl App {
                         .rounding(Rounding::same(8.0))
                         .inner_margin(Margin::symmetric(11.0, 8.0))
                         .show(tui, |tui| {
-                            tui.label(RichText::new(&it.label).font(theme::body(12.5)).color(palette.ink).strong());
+                            tui.label(
+                                RichText::new(&it.label)
+                                    .font(theme::body(12.5))
+                                    .color(palette.ink)
+                                    .strong(),
+                            );
                             let meta = if it.synthetic {
-                                format!("{} · {} small items aggregated", fmt_bytes(it.bytes), fmt_count(it.files))
+                                format!(
+                                    "{} · {} small items aggregated",
+                                    fmt_bytes(it.bytes),
+                                    fmt_count(it.files)
+                                )
                             } else {
                                 let total = node.bytes().max(1);
                                 format!(
@@ -1259,57 +1343,39 @@ impl App {
                                     fmt_count(it.files)
                                 )
                             };
-                            tui.label(RichText::new(meta).font(theme::mono(10.5)).color(palette.muted));
-                            let hint = if it.denied {
-                                "access denied — grant Full Disk Access to see inside"
-                            } else if it.is_dir && !it.synthetic {
-                                "click = drill in · ⌘-click = move to SSD · right-click = back · ⌥-click = reveal"
-                            } else if !it.synthetic {
-                                "⌘-click = move to SSD · right-click = back · ⌥-click = reveal"
-                            } else {
-                                "aggregate of items too small to chart · right-click = back"
-                            };
                             tui.label(
-                                RichText::new(hint)
+                                RichText::new(meta)
+                                    .font(theme::mono(10.5))
+                                    .color(palette.muted),
+                            );
+                            tui.label(
+                                RichText::new(map_item_hint(it.is_dir, it.synthetic, it.denied))
                                     .font(theme::body(9.5))
                                     .color(palette.faint),
                             );
                         });
                 });
-
-            if resp.clicked() {
-                let cmd = ui.input(|i| i.modifiers.command);
-                let alt = ui.input(|i| i.modifiers.alt);
-                if cmd {
-                    if let Some(n) = &it.node {
-                        if !it.synthetic {
-                            let real = strip_data_root(&n.path);
-                            self.open_offload_dialog(real, n.bytes());
-                        }
-                    }
-                } else if alt {
-                    if let Some(n) = &it.node {
-                        reveal_in_finder(&n.path);
-                    }
-                } else if it.is_dir && !it.synthetic && !it.denied {
-                    if let Some(n) = &it.node {
-                        let src = laid
-                            .iter()
-                            .find(|(i, _)| *i == idx)
-                            .map(|(_, r)| *r)
-                            .unwrap_or(map_rect);
-                        self.crumbs.push(n.clone());
-                        self.view = Some(n.clone());
-                        self.zoom = Some((src, Instant::now()));
-                    }
-                }
-            }
         }
-        // secondary click / Esc-style up navigation
-        if resp.secondary_clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.crumbs.pop();
-            self.view = self.crumbs.last().cloned();
-            self.zoom = None;
+
+        match requested_action {
+            Some(MapActionRequest::Open { node, source }) => {
+                self.crumbs.push(node.clone());
+                self.view = Some(node);
+                self.zoom = Some((source, Instant::now()));
+            }
+            Some(MapActionRequest::Reveal(path)) => reveal_in_finder(&path),
+            Some(MapActionRequest::MoveToSsd { path, bytes }) => {
+                self.open_offload_dialog(path, bytes);
+            }
+            None => {}
+        }
+
+        if !menu_open && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            if let Some(target) = back_target(self.crumbs.len()) {
+                self.crumbs.truncate(target);
+                self.view = self.crumbs.last().cloned();
+                self.zoom = None;
+            }
         }
     }
 
