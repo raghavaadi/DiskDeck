@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc::Sender, Arc};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::scan::Node;
 
 const MAGIC: &[u8; 8] = b"DDHIST1\0";
 const MIN_GROWTH_BYTES: i64 = 10 << 20;
@@ -186,10 +190,149 @@ fn decode(bytes: &[u8]) -> Result<Snapshot, String> {
     })
 }
 
+fn capture(root: &Arc<Node>, captured_at_ms: i64) -> Snapshot {
+    fn walk(root_path: &Path, node: &Arc<Node>, entries: &mut Vec<Entry>) {
+        for child in node.kids() {
+            let Ok(path) = child.path.strip_prefix(root_path) else {
+                continue;
+            };
+            entries.push(Entry {
+                path: path.to_path_buf(),
+                bytes: child.bytes(),
+                files: child.files(),
+                is_dir: child.is_dir,
+            });
+            if child.is_dir {
+                walk(root_path, &child, entries);
+            }
+        }
+    }
+
+    let mut entries = Vec::new();
+    walk(&root.path, root, &mut entries);
+    Snapshot {
+        captured_at_ms,
+        root: root.path.clone(),
+        total_bytes: root.bytes(),
+        entries,
+    }
+}
+
+fn snapshot_key(path: &Path) -> Option<(i64, u32)> {
+    let name = path.file_name()?.to_str()?;
+    let middle = name.strip_prefix("snapshot-")?.strip_suffix(".ddhist")?;
+    let (captured, process) = middle.rsplit_once('-')?;
+    if captured.is_empty()
+        || process.is_empty()
+        || !captured.bytes().all(|byte| byte.is_ascii_digit())
+        || !process.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((captured.parse().ok()?, process.parse().ok()?))
+}
+
+fn matching_snapshot_paths(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    let entries = std::fs::read_dir(dir).map_err(|error| format!("read history: {error}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read history entry: {error}"))?;
+        if !entry
+            .file_type()
+            .map_err(|error| format!("inspect history entry: {error}"))?
+            .is_file()
+        {
+            continue;
+        }
+        let path = entry.path();
+        if snapshot_key(&path).is_some() {
+            paths.push(path);
+        }
+    }
+    paths.sort_by_key(|path| std::cmp::Reverse(snapshot_key(path).unwrap()));
+    Ok(paths)
+}
+
+fn load_latest_compatible(dir: &Path, root: &Path) -> Result<Option<Snapshot>, String> {
+    for path in matching_snapshot_paths(dir)? {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(snapshot) = decode(&bytes) else {
+            continue;
+        };
+        if snapshot.root == root {
+            return Ok(Some(snapshot));
+        }
+    }
+    Ok(None)
+}
+
+fn record(dir: &Path, current: &Snapshot) -> Result<Option<GrowthSummary>, String> {
+    std::fs::create_dir_all(dir).map_err(|error| format!("create history: {error}"))?;
+    let previous = load_latest_compatible(dir, &current.root)?;
+    let bytes = encode(current)?;
+    let process = std::process::id();
+    let filename = format!(
+        "snapshot-{:020}-{process}.ddhist",
+        current.captured_at_ms.max(0)
+    );
+    let final_path = dir.join(&filename);
+    let temp_path = dir.join(format!(".{filename}.tmp"));
+    let mut file = std::fs::File::create(&temp_path)
+        .map_err(|error| format!("create history snapshot: {error}"))?;
+    if let Err(error) = file
+        .write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .and_then(|_| std::fs::rename(&temp_path, &final_path))
+    {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("write history snapshot: {error}"));
+    }
+
+    let paths = matching_snapshot_paths(dir)?;
+    for old in paths.into_iter().skip(12) {
+        std::fs::remove_file(&old).map_err(|error| format!("prune history snapshot: {error}"))?;
+    }
+    Ok(previous.and_then(|previous| compare(&previous, current)))
+}
+
+pub fn default_history_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("DiskDeck")
+            .join("History")
+    })
+}
+
+pub fn record_scan(root: Arc<Node>, dir: PathBuf, tx: Sender<HistoryEvent>) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("scan-history".into())
+        .spawn(move || {
+            let captured_at_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or(0);
+            let current = capture(&root, captured_at_ms);
+            let event = match record(&dir, &current) {
+                Ok(Some(summary)) => HistoryEvent::Compared(summary),
+                Ok(None) => HistoryEvent::BaselineSaved,
+                Err(error) => HistoryEvent::Failed(error),
+            };
+            let _ = tx.send(event);
+        })
+        .map(|_| ())
+        .map_err(|error| format!("start scan history: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::{start_scan, ScanState};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::time::{Duration, Instant};
 
     const MB: i64 = 1 << 20;
 
@@ -290,5 +433,70 @@ mod tests {
         let mut trailing = bytes;
         trailing.push(0);
         assert!(decode(&trailing).is_err());
+    }
+
+    #[test]
+    fn storage_capture_uses_compacted_relative_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let big = tmp.path().join("Big/data.bin");
+        std::fs::create_dir_all(big.parent().unwrap()).unwrap();
+        std::fs::write(&big, vec![1u8; 11 << 20]).unwrap();
+        let scan = start_scan(tmp.path().to_path_buf());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while scan.state() == ScanState::Running && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(scan.state(), ScanState::Done);
+        let snapshot = capture(&scan.root, 123);
+        assert_eq!(snapshot.captured_at_ms, 123);
+        assert_eq!(snapshot.root, tmp.path());
+        assert_eq!(snapshot.total_bytes, scan.root.bytes());
+        assert!(snapshot
+            .entries
+            .iter()
+            .any(|entry| entry.path == PathBuf::from("Big")));
+        assert!(snapshot
+            .entries
+            .iter()
+            .all(|entry| !entry.path.is_absolute()));
+    }
+
+    #[test]
+    fn storage_record_retains_twelve_matching_files_and_unrelated_contents() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("keep.txt"), b"keep").unwrap();
+        for captured_at_ms in 1..=14 {
+            let snapshot = Snapshot {
+                captured_at_ms,
+                root: PathBuf::from("/System/Volumes/Data"),
+                total_bytes: captured_at_ms,
+                entries: vec![],
+            };
+            record(tmp.path(), &snapshot).unwrap();
+        }
+        assert_eq!(matching_snapshot_paths(tmp.path()).unwrap().len(), 12);
+        assert_eq!(std::fs::read(tmp.path().join("keep.txt")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn storage_record_skips_a_corrupt_newest_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let previous = Snapshot {
+            captured_at_ms: 10,
+            root: PathBuf::from("/System/Volumes/Data"),
+            total_bytes: 100,
+            entries: vec![],
+        };
+        record(tmp.path(), &previous).unwrap();
+        std::fs::write(tmp.path().join("snapshot-999-1.ddhist"), b"broken").unwrap();
+        let current = Snapshot {
+            captured_at_ms: 1_000,
+            root: previous.root.clone(),
+            total_bytes: 125,
+            entries: vec![],
+        };
+        let summary = record(tmp.path(), &current).unwrap().unwrap();
+        assert_eq!(summary.previous_at_ms, 10);
+        assert_eq!(summary.total_delta, 25);
     }
 }
