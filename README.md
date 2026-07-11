@@ -176,8 +176,8 @@ Born 2026-06-12 after a manual cleanup session recovered ~70 GB. Parked v2
 ideas: regrowth tracking between scans, Docker deep-dive panel, APFS snapshot/purgeable
 accounting, app-leftover detection, menu-bar free-space readout.
 
-Fonts: Saira Condensed (SIL OFL, see `assets/fonts/OFL.txt`); numerals use
-egui's built-in Hack.
+Fonts: Inter (SIL OFL, see `assets/fonts/LICENSE.txt`) for the native-width UI;
+paths and scan data use egui's built-in Hack.
 
 Brand source: `assets/logo.svg` is the approved transparent standalone mark.
 `assets/AppIcon.icon` supplies Default, Dark, and Mono/Tinted macOS 26

@@ -67,11 +67,12 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 ## Hard-won gotchas (do not relearn)
 
 - **egui font tofu:** `spaced()` once inserted U+200A hair-spaces for
-  letter-spacing — Saira Condensed has no glyph for it, and a custom
-  `FontFamily` had no fallback fonts, so every label rendered `?` boxes.
-  `spaced()` is now identity AND the display families append the default
-  proportional stack as fallback. Never use invisible-space tricks without
-  checking glyph coverage; **always verify type on screen** after font work.
+  letter-spacing — the former Saira Condensed face had no glyph for it, and a
+  custom `FontFamily` had no fallback fonts, so every label rendered `?`
+  boxes. `spaced()` is now identity. Inter owns the regular/medium/semibold UI
+  roles, and every family appends egui's proportional fallback stack. Never
+  use invisible-space tricks without checking glyph coverage; **always verify
+  type on screen** after font work.
 - **Icon:** the gauge deliberately has NO unfilled track arc — at dock size
   a dark track remainder reads as a "backwards-L" artifact (user-reported).
   Ticks define the dial. If you regenerate the icon, render the SVG via

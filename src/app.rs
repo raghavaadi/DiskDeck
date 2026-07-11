@@ -87,6 +87,8 @@ pub struct App {
     offloading: bool,
     dialog: Option<OffloadDialog>,
     dialog_hold: f32,
+    review_open: bool,
+    activity_open: bool,
 }
 
 fn now_hms() -> String {
@@ -137,6 +139,8 @@ impl App {
             offloading: false,
             dialog: None,
             dialog_hold: 0.0,
+            review_open: false,
+            activity_open: false,
         }
     }
 
@@ -419,13 +423,24 @@ impl App {
 struct WorkspaceLayout {
     overview: Rect,
     map: Rect,
+    rail: Rect,
 }
 
 impl WorkspaceLayout {
     fn from_rect(full: Rect) -> Self {
-        let overview = Rect::from_min_size(full.min, vec2(full.width(), 142.0));
-        let map = Rect::from_min_max(pos2(full.min.x, overview.max.y + 12.0), full.max);
-        Self { overview, map }
+        let overview = Rect::from_min_size(full.min, vec2(full.width(), 128.0));
+        let content_top = overview.max.y + 12.0;
+        let rail_w = (full.width() * 0.28).clamp(320.0, 344.0);
+        let rail = Rect::from_min_max(pos2(full.max.x - rail_w, content_top), full.max);
+        let map = Rect::from_min_max(
+            pos2(full.min.x, content_top),
+            pos2(rail.min.x - 12.0, full.max.y),
+        );
+        Self {
+            overview,
+            map,
+            rail,
+        }
     }
 }
 
@@ -435,12 +450,14 @@ mod tests {
 
     #[test]
     fn workspace_layout_preserves_map_space_at_minimum_window() {
-        let full = Rect::from_min_size(Pos2::ZERO, vec2(766.0, 564.0));
+        let full = Rect::from_min_size(Pos2::ZERO, vec2(1156.0, 564.0));
         let layout = WorkspaceLayout::from_rect(full);
-        assert_eq!(layout.overview.height(), 142.0);
+        assert_eq!(layout.overview.height(), 128.0);
         assert!(layout.map.height() >= 410.0);
+        assert!(layout.map.width() >= 760.0);
+        assert!(layout.map.max.x <= full.max.x - 320.0);
         assert_eq!(layout.overview.min, full.min);
-        assert_eq!(layout.map.max, full.max);
+        assert_eq!(layout.map.max.y, full.max.y);
     }
 
     #[test]
@@ -448,6 +465,13 @@ mod tests {
         let full = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 700.0));
         let layout = WorkspaceLayout::from_rect(full);
         assert_eq!(layout.map.min.y - layout.overview.max.y, 12.0);
+    }
+
+    #[test]
+    fn adaptive_native_opens_on_summary_without_the_activity_drawer() {
+        let app = App::new();
+        assert!(!app.review_open);
+        assert!(!app.activity_open);
     }
 }
 
@@ -469,7 +493,7 @@ fn panel_chrome(ui: &egui::Ui, rect: Rect, title: &str, sub: Option<(String, Col
             pos2(rect.max.x - 14.0, rect.min.y + 10.0),
             Align2::RIGHT_TOP,
             sub,
-            theme::mono(10.0),
+            theme::body(10.0),
             color,
         );
     }
@@ -562,6 +586,63 @@ fn ghost_button(ui: &mut egui::Ui, text: &str, hot: bool) -> egui::Response {
     resp
 }
 
+fn summary_target_card(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    id_salt: &'static str,
+    marker: &str,
+    title: &str,
+    detail: &str,
+    bytes: i64,
+    color: Color32,
+) -> egui::Response {
+    let palette = theme::palette(ui.ctx());
+    let response = ui.interact(rect, ui.id().with(id_salt), Sense::click());
+    let fill = if response.hovered() {
+        palette.surface_raised
+    } else {
+        palette.surface
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, Rounding::same(12.0), fill);
+    painter.rect_stroke(rect, Rounding::same(12.0), Stroke::new(1.0, palette.edge));
+    let marker_rect = Rect::from_min_size(rect.min + vec2(12.0, 25.0), vec2(18.0, 18.0));
+    painter.rect_filled(
+        marker_rect,
+        Rounding::same(5.0),
+        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 38),
+    );
+    painter.text(
+        marker_rect.center(),
+        Align2::CENTER_CENTER,
+        marker,
+        theme::display(10.0),
+        color,
+    );
+    painter.text(
+        rect.min + vec2(40.0, 15.0),
+        Align2::LEFT_TOP,
+        title,
+        theme::display_md(12.0),
+        palette.ink,
+    );
+    painter.text(
+        rect.min + vec2(40.0, 35.0),
+        Align2::LEFT_TOP,
+        detail,
+        theme::body(10.0),
+        palette.muted,
+    );
+    painter.text(
+        rect.max - vec2(12.0, 31.0),
+        Align2::RIGHT_CENTER,
+        fmt_bytes(bytes),
+        theme::display_md(12.0),
+        color,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         if !self.booted {
@@ -588,8 +669,9 @@ impl eframe::App for App {
         }
 
         self.top_bar(ctx);
-        self.ops_panel(ctx);
-        self.recs_panel(ctx);
+        if self.activity_open {
+            self.ops_panel(ctx);
+        }
         self.central(ctx);
         self.offload_dialog(ctx);
         self.stamp_overlay(ctx);
@@ -600,7 +682,7 @@ impl App {
     fn top_bar(&mut self, ctx: &Context) {
         let palette = theme::palette(ctx);
         egui::TopBottomPanel::top("topbar")
-            .exact_height(56.0)
+            .exact_height(48.0)
             .frame(
                 Frame::none()
                     .fill(palette.toolbar)
@@ -649,6 +731,38 @@ impl App {
                         fda.on_hover_text(
                             "If parts of the disk show NO ACCESS, grant DiskDeck Full Disk Access and rescan. A residual count (~185) of root-only system dirs is normal.",
                         );
+                        ui.add_space(8.0);
+                        let status = if self.cleaning {
+                            "Reclaiming"
+                        } else if self.scanning() {
+                            "Scanning"
+                        } else if self.scan_done() {
+                            "Scan complete"
+                        } else {
+                            "Activity"
+                        };
+                        let activity = ui.add(
+                            egui::Button::new(
+                                RichText::new(status)
+                                    .font(theme::display_md(10.5))
+                                    .color(if self.scanning() || self.cleaning {
+                                        palette.accent
+                                    } else {
+                                        palette.muted
+                                    }),
+                            )
+                            .fill(if self.activity_open {
+                                palette.surface_raised
+                            } else {
+                                Color32::TRANSPARENT
+                            })
+                            .stroke(Stroke::new(1.0, palette.edge_soft))
+                            .rounding(Rounding::same(7.0)),
+                        );
+                        if activity.clicked() {
+                            self.activity_open = !self.activity_open;
+                        }
+                        activity.on_hover_text("Show or hide scan activity");
                     });
                 });
             });
@@ -666,15 +780,9 @@ impl App {
                 let full = ui.available_rect_before_wrap();
                 let layout = WorkspaceLayout::from_rect(full);
 
-                let capacity_rect =
-                    Rect::from_min_size(layout.overview.min, vec2(330.0, layout.overview.height()));
-                let tele_rect = Rect::from_min_max(
-                    pos2(capacity_rect.max.x + 12.0, layout.overview.min.y),
-                    layout.overview.max,
-                );
-                self.draw_capacity(ui, capacity_rect);
-                self.draw_telemetry(ui, tele_rect);
+                self.draw_capacity(ui, layout.overview);
                 self.draw_map(ui, layout.map);
+                self.draw_recs(ui, layout.rail);
             });
     }
 
@@ -683,8 +791,21 @@ impl App {
         let content = panel_chrome(
             ui,
             rect,
-            "Storage used",
-            Some((format!("{:.0}%", self.stats.used_pct), palette.faint)),
+            "Macintosh HD · storage used",
+            Some((
+                if self.scanning() {
+                    "Scanning".to_string()
+                } else if self.scan_done() {
+                    "Scan complete".to_string()
+                } else {
+                    "Ready".to_string()
+                },
+                if self.scanning() {
+                    palette.accent
+                } else {
+                    palette.faint
+                },
+            )),
         );
         let p = ui.painter();
         let c = pos2(content.max.x - 54.0, content.center().y + 1.0);
@@ -715,7 +836,7 @@ impl App {
             content.min + vec2(16.0, 12.0),
             Align2::LEFT_TOP,
             fmt_bytes(self.stats.used),
-            theme::mono(28.0),
+            theme::display(30.0),
             palette.ink,
         );
         p.text(
@@ -731,6 +852,7 @@ impl App {
         );
     }
 
+    #[allow(dead_code)]
     fn draw_telemetry(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let palette = theme::palette(ui.ctx());
         let scanning = self.scanning();
@@ -886,7 +1008,12 @@ impl App {
         let hint = if depth > 0 {
             Some(("right-click or esc = back".to_string(), palette.faint))
         } else {
-            None
+            self.scan.as_ref().map(|scan| {
+                (
+                    format!("{} items mapped", fmt_count(scan.root.files())),
+                    palette.faint,
+                )
+            })
         };
         let content = panel_chrome(ui, rect, "Storage map", hint);
 
@@ -1050,7 +1177,11 @@ impl App {
                             } else {
                                 "aggregate of items too small to chart · right-click = back"
                             };
-                            tui.label(RichText::new(hint).font(theme::mono(9.5)).color(palette.faint));
+                            tui.label(
+                                RichText::new(hint)
+                                    .font(theme::body(9.5))
+                                    .color(palette.faint),
+                            );
                         });
                 });
 
@@ -1090,49 +1221,55 @@ impl App {
         }
     }
 
-    fn recs_panel(&mut self, ctx: &Context) {
-        let palette = theme::palette(ctx);
+    fn draw_recs(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        if !self.review_open {
+            self.draw_reclaim_summary(ui, rect);
+            return;
+        }
+
+        let palette = theme::palette(ui.ctx());
         let meta = if self.recs.is_empty() {
             String::new()
         } else {
             let total: i64 = self.recs.iter().map(|r| r.rec.bytes).sum();
             format!("{} targets · {}", self.recs.len(), fmt_bytes(total))
         };
-        egui::SidePanel::right("recs")
-            .exact_width(390.0)
-            .frame(Frame::none().fill(palette.canvas).inner_margin(Margin {
-                left: 0.0,
-                right: 12.0,
-                top: 12.0,
-                bottom: 12.0,
-            }))
-            .show(ctx, |ui| {
-                let rect = ui.available_rect_before_wrap();
-                let content = panel_chrome(ui, rect, "Reclaimable", Some((meta, palette.faint)));
-                let footer_h = 64.0;
-                let list_rect = Rect::from_min_max(content.min, pos2(content.max.x, content.max.y - footer_h));
-                let footer_rect = Rect::from_min_max(pos2(content.min.x, list_rect.max.y), content.max);
+        let content = panel_chrome(ui, rect, "Review targets", Some((meta, palette.faint)));
+        let footer_h = 64.0;
+        let nav_rect = Rect::from_min_size(
+            content.min + vec2(10.0, 4.0),
+            vec2(content.width() - 20.0, 28.0),
+        );
+        let list_rect = Rect::from_min_max(
+            pos2(content.min.x, nav_rect.max.y + 2.0),
+            pos2(content.max.x, content.max.y - footer_h),
+        );
+        let footer_rect = Rect::from_min_max(pos2(content.min.x, list_rect.max.y), content.max);
 
-                let mut reveal: Option<std::path::PathBuf> = None;
-                let mut offload_req: Option<(std::path::PathBuf, i64)> = None;
-                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list_rect.shrink2(vec2(10.0, 6.0))), |ui| {
-                    if self.recs.is_empty() {
-                        ui.add_space(40.0);
-                        ui.vertical_centered(|ui| {
-                            ui.label(
-                                RichText::new("Recommendations appear after a scan")
-                                    .font(theme::body(12.0))
-                                    .color(palette.faint),
-                            );
-                            ui.label(
-                                RichText::new("each one explains what it is, what restoring costs,\nand how it gets removed")
-                                    .font(theme::mono(9.5))
-                                    .color(palette.faint),
-                            );
-                        });
-                        return;
-                    }
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(nav_rect), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("← Reclaim summary")
+                            .font(theme::display_md(10.5))
+                            .color(palette.accent),
+                    )
+                    .frame(false),
+                )
+                .clicked()
+            {
+                self.review_open = false;
+            }
+        });
+
+        let mut reveal: Option<std::path::PathBuf> = None;
+        let mut offload_req: Option<(std::path::PathBuf, i64)> = None;
+        ui.allocate_new_ui(
+            egui::UiBuilder::new().max_rect(list_rect.shrink2(vec2(10.0, 4.0))),
+            |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
                         for tier in [Tier::Safe, Tier::Caution] {
                             let group: Vec<usize> = self
                                 .recs
@@ -1146,38 +1283,199 @@ impl App {
                             }
                             let (label, color) = match tier {
                                 Tier::Safe => ("Safe · regenerates automatically", palette.safe),
-                                Tier::Caution => ("Review · may require a download", palette.caution),
+                                Tier::Caution => {
+                                    ("Review · may require a download", palette.caution)
+                                }
                             };
                             let total: i64 = group.iter().map(|&i| self.recs[i].rec.bytes).sum();
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
-                                let (dot, _) = ui.allocate_exact_size(vec2(10.0, 14.0), Sense::hover());
+                                let (dot, _) =
+                                    ui.allocate_exact_size(vec2(10.0, 14.0), Sense::hover());
                                 ui.painter().circle_filled(dot.center(), 3.5, color);
-                                ui.label(RichText::new(label).font(theme::body(10.5)).color(color).strong());
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(RichText::new(fmt_bytes(total)).font(theme::mono(10.5)).color(palette.muted));
-                                });
+                                ui.label(
+                                    RichText::new(label)
+                                        .font(theme::display_md(10.5))
+                                        .color(color),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            RichText::new(fmt_bytes(total))
+                                                .font(theme::mono(10.5))
+                                                .color(palette.muted),
+                                        );
+                                    },
+                                );
                             });
-                            ui.add_space(4.0);
+                            ui.add_space(5.0);
                             for i in group {
                                 if let Some(path) = self.rec_card(ui, i, &mut offload_req) {
                                     reveal = Some(path);
                                 }
-                                ui.add_space(5.0);
+                                ui.add_space(6.0);
                             }
                         }
                         ui.add_space(6.0);
                     });
-                });
-                if let Some(p) = reveal {
-                    reveal_in_finder(&p);
-                }
-                if let Some((p, sz)) = offload_req {
-                    self.open_offload_dialog(p, sz);
-                }
+            },
+        );
+        if let Some(path) = reveal {
+            reveal_in_finder(&path);
+        }
+        if let Some((path, size)) = offload_req {
+            self.open_offload_dialog(path, size);
+        }
+        self.reclaim_footer(ui, footer_rect);
+    }
 
-                self.reclaim_footer(ui, footer_rect);
-            });
+    fn draw_reclaim_summary(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let total: i64 = self.recs.iter().map(|row| row.rec.bytes).sum();
+        let safe: i64 = self
+            .recs
+            .iter()
+            .filter(|row| row.rec.tier == Tier::Safe)
+            .map(|row| row.rec.bytes)
+            .sum();
+        let caution: i64 = self
+            .recs
+            .iter()
+            .filter(|row| row.rec.tier == Tier::Caution)
+            .map(|row| row.rec.bytes)
+            .sum();
+        let selected: i64 = self
+            .recs
+            .iter()
+            .filter(|row| row.checked)
+            .map(|row| row.rec.bytes)
+            .sum();
+
+        let top = Rect::from_min_size(rect.min, vec2(rect.width(), 84.0));
+        ui.painter()
+            .rect_filled(top, Rounding::same(12.0), palette.surface);
+        ui.painter()
+            .rect_stroke(top, Rounding::same(12.0), Stroke::new(1.0, palette.edge));
+        ui.painter().text(
+            top.min + vec2(14.0, 13.0),
+            Align2::LEFT_TOP,
+            "Reclaimable",
+            theme::display_md(11.0),
+            palette.muted,
+        );
+        ui.painter().text(
+            top.min + vec2(14.0, 36.0),
+            Align2::LEFT_TOP,
+            if self.recs_built {
+                fmt_bytes(total)
+            } else {
+                "Scanning…".to_string()
+            },
+            theme::display(22.0),
+            palette.ink,
+        );
+        ui.painter().text(
+            top.max - vec2(14.0, 22.0),
+            Align2::RIGHT_CENTER,
+            if self.recs_built {
+                format!("{} targets", self.recs.len())
+            } else {
+                "Read-only scan".to_string()
+            },
+            theme::body(10.0),
+            palette.faint,
+        );
+
+        let safe_rect =
+            Rect::from_min_size(pos2(rect.min.x, top.max.y + 8.0), vec2(rect.width(), 70.0));
+        let caution_rect = Rect::from_min_size(
+            pos2(rect.min.x, safe_rect.max.y + 8.0),
+            vec2(rect.width(), 70.0),
+        );
+        let safe_response = summary_target_card(
+            ui,
+            safe_rect,
+            "safe-summary",
+            "✓",
+            "Safe caches",
+            "Regenerates automatically",
+            safe,
+            palette.safe,
+        );
+        let caution_response = summary_target_card(
+            ui,
+            caution_rect,
+            "caution-summary",
+            "!",
+            "Needs review",
+            "May require re-download",
+            caution,
+            palette.caution,
+        );
+        if (safe_response.clicked() || caution_response.clicked()) && self.recs_built {
+            self.review_open = true;
+        }
+
+        let footer = Rect::from_min_max(pos2(rect.min.x, rect.max.y - 112.0), rect.max);
+        let footer_fill = if ui.visuals().dark_mode {
+            Color32::from_rgb(0x14, 0x2a, 0x2c)
+        } else {
+            Color32::from_rgb(0xf7, 0xfb, 0xfa)
+        };
+        ui.painter()
+            .rect_filled(footer, Rounding::same(12.0), footer_fill);
+        ui.painter().rect_stroke(
+            footer,
+            Rounding::same(12.0),
+            Stroke::new(1.0, palette.safe_dim(90)),
+        );
+        ui.painter().text(
+            footer.min + vec2(14.0, 12.0),
+            Align2::LEFT_TOP,
+            "Selected safely",
+            theme::display_md(10.0),
+            palette.muted,
+        );
+        ui.painter().text(
+            footer.min + vec2(14.0, 31.0),
+            Align2::LEFT_TOP,
+            fmt_bytes(selected),
+            theme::display(20.0),
+            palette.ink,
+        );
+        let button =
+            Rect::from_min_max(footer.min + vec2(10.0, 66.0), footer.max - vec2(10.0, 10.0));
+        let enabled = self.recs_built && !self.recs.is_empty();
+        let response = ui.interact(button, ui.id().with("review-targets"), Sense::click());
+        let button_color = if ui.visuals().dark_mode {
+            palette.safe
+        } else {
+            palette.accent
+        };
+        ui.painter().rect_filled(
+            button,
+            Rounding::same(8.0),
+            button_color.gamma_multiply(if enabled { 1.0 } else { 0.35 }),
+        );
+        ui.painter().text(
+            button.center(),
+            Align2::CENTER_CENTER,
+            if enabled {
+                "Review targets"
+            } else {
+                "Scanning for targets…"
+            },
+            theme::display_md(11.0),
+            if ui.visuals().dark_mode {
+                Color32::from_rgb(0x08, 0x2c, 0x29)
+            } else {
+                Color32::WHITE
+            },
+        );
+        if enabled && response.clicked() {
+            self.review_open = true;
+        }
     }
 
     /// One recommendation card. Returns Some(path) if "reveal" was clicked.
@@ -1193,26 +1491,11 @@ impl App {
         let rec_real = strip_data_root(&self.recs[idx].rec.path);
         let rec_size = self.recs[idx].rec.bytes;
         let row = &mut self.recs[idx];
-        let selected_color = if row.action == Action::Delete {
-            palette.danger
-        } else if row.rec.tier == Tier::Caution {
-            palette.caution
-        } else {
-            palette.safe
-        };
         let (border, fill) = match (&row.status, row.checked) {
             (RecStatus::Running, _) => (palette.accent_dim(110), palette.surface_raised),
             (RecStatus::Failed(_), _) => (palette.danger_dim(120), palette.surface_raised),
-            (_, true) => (
-                Color32::from_rgba_unmultiplied(
-                    selected_color.r(),
-                    selected_color.g(),
-                    selected_color.b(),
-                    110,
-                ),
-                palette.surface_raised,
-            ),
-            _ => (palette.edge_soft, palette.surface_raised),
+            (_, true) => (palette.edge, palette.surface),
+            _ => (palette.edge_soft, palette.surface),
         };
         let dimmed = matches!(row.status, RecStatus::Cleared(_) | RecStatus::InTrash(_));
 
@@ -1220,7 +1503,7 @@ impl App {
             .fill(fill)
             .stroke(Stroke::new(1.0, border))
             .rounding(Rounding::same(10.0))
-            .inner_margin(Margin::symmetric(10.0, 9.0))
+            .inner_margin(Margin::symmetric(11.0, 10.0))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if dimmed {
@@ -1232,9 +1515,8 @@ impl App {
                         let title_resp = ui.add(
                             Label::new(
                                 RichText::new(&row.rec.title)
-                                    .font(theme::body(13.0))
-                                    .color(palette.ink)
-                                    .strong(),
+                                    .font(theme::display_md(13.0))
+                                    .color(palette.ink),
                             )
                             .sense(Sense::click())
                             .truncate(),

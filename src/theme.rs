@@ -88,32 +88,47 @@ pub fn palette(ctx: &Context) -> Palette {
 pub fn install(ctx: &Context) {
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert(
-        "saira_sb".into(),
-        FontData::from_static(include_bytes!(
-            "../assets/fonts/SairaCondensed-SemiBold.ttf"
-        )),
+        "inter_regular".into(),
+        FontData::from_static(include_bytes!("../assets/fonts/Inter-Regular.ttf")),
     );
     fonts.font_data.insert(
-        "saira_md".into(),
-        FontData::from_static(include_bytes!("../assets/fonts/SairaCondensed-Medium.ttf")),
+        "inter_medium".into(),
+        FontData::from_static(include_bytes!("../assets/fonts/Inter-Medium.ttf")),
     );
-    // include egui's built-in fonts as fallback so any glyph Saira lacks
-    // still renders instead of tofu
+    fonts.font_data.insert(
+        "inter_semibold".into(),
+        FontData::from_static(include_bytes!("../assets/fonts/Inter-SemiBold.ttf")),
+    );
+    // Keep egui's built-in fonts behind Inter for symbols and scripts that
+    // Inter does not cover. Every UI role uses Inter's native-width metrics;
+    // monospace remains reserved for paths and scan data.
     let fallback: Vec<String> = fonts
         .families
         .get(&FontFamily::Proportional)
         .cloned()
         .unwrap_or_default();
-    let mut display_stack = vec!["saira_sb".to_string()];
-    display_stack.extend(fallback.iter().cloned());
-    let mut display_md_stack = vec!["saira_md".to_string()];
-    display_md_stack.extend(fallback);
+    let mut regular_stack = vec!["inter_regular".to_string()];
+    regular_stack.extend(fallback.iter().cloned());
+    let mut medium_stack = vec!["inter_medium".to_string(), "inter_regular".to_string()];
+    medium_stack.extend(fallback.iter().cloned());
+    let mut semibold_stack = vec![
+        "inter_semibold".to_string(),
+        "inter_medium".to_string(),
+        "inter_regular".to_string(),
+    ];
+    semibold_stack.extend(fallback);
     fonts
         .families
-        .insert(FontFamily::Name("display".into()), display_stack);
+        .insert(FontFamily::Proportional, regular_stack.clone());
     fonts
         .families
-        .insert(FontFamily::Name("display-md".into()), display_md_stack);
+        .insert(FontFamily::Name("inter-regular".into()), regular_stack);
+    fonts
+        .families
+        .insert(FontFamily::Name("inter-medium".into()), medium_stack);
+    fonts
+        .families
+        .insert(FontFamily::Name("inter-semibold".into()), semibold_stack);
     ctx.set_fonts(fonts);
 
     ctx.set_theme(ThemePreference::System);
@@ -145,22 +160,20 @@ pub fn install(ctx: &Context) {
 }
 
 pub fn display(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("display".into()))
+    FontId::new(size, FontFamily::Name("inter-semibold".into()))
 }
 pub fn display_md(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("display-md".into()))
+    FontId::new(size, FontFamily::Name("inter-medium".into()))
 }
 pub fn mono(size: f32) -> FontId {
     FontId::monospace(size)
 }
 pub fn body(size: f32) -> FontId {
-    FontId::proportional(size)
+    FontId::new(size, FontFamily::Name("inter-regular".into()))
 }
 
-/// Display caps pass-through. (Hair-space letter-spacing was tried and
-/// rendered tofu — U+200A has no glyph in Saira Condensed, and at the time
-/// the display family had no fallback. Condensed caps read fine unspaced;
-/// don't reintroduce invisible-space tricks without checking glyph coverage.)
+/// Text pass-through. egui has no tracking control, and inserting Unicode
+/// spaces changes wrapping and glyph fallback in surprising ways.
 #[allow(dead_code)]
 pub fn spaced(s: &str) -> String {
     s.to_string()
@@ -213,5 +226,19 @@ mod tests {
             Palette::for_theme(Theme::Dark).canvas,
             Color32::from_rgb(0x10, 0x15, 0x1d)
         );
+    }
+
+    #[test]
+    fn adaptive_native_type_roles_use_inter_for_ui_and_mono_for_data() {
+        assert_eq!(
+            display(20.0).family,
+            FontFamily::Name("inter-semibold".into())
+        );
+        assert_eq!(
+            display_md(13.0).family,
+            FontFamily::Name("inter-medium".into())
+        );
+        assert_eq!(body(12.0).family, FontFamily::Name("inter-regular".into()));
+        assert_eq!(mono(11.0).family, FontFamily::Monospace);
     }
 }
