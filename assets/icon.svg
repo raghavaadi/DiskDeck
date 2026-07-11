@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">DiskDeck app icon</title>
+  <desc id="desc">A dark flight-deck tile containing three stacked disk platters and an amber reclaimed-space wedge.</desc>
+
+  <rect x="68" y="68" width="888" height="888" rx="205" fill="#07111F"/>
+  <rect x="72" y="72" width="880" height="880" rx="201" fill="none" stroke="#1C3B57" stroke-width="8"/>
+
+  <g transform="translate(51 59) scale(.90)">
+    <path fill="#286783" d="M590 70A275 275 0 1 0 775 350L575 332A80 80 0 0 0 535 260Z"/>
+    <path fill="#FF9F0A" d="M612 86A260 260 0 0 1 760 338L590 323A66 66 0 0 0 555 276Z"/>
+    <circle cx="548" cy="332" r="33" fill="#22B8E6"/>
+    <path fill="#245A78" d="M210 535C300 660 690 720 790 535C765 700 650 775 500 785C350 775 235 700 210 535Z"/>
+    <path fill="#1E4D6A" d="M245 690C340 805 650 835 760 675C720 845 615 920 490 925C360 915 270 830 245 690Z"/>
+  </g>
+</svg>

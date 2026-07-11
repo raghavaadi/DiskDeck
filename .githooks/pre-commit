@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+TOP=$(git rev-parse --show-toplevel)
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/diskdeck-pre-commit.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+git diff --cached --name-only --diff-filter=ACMR > "$TMP/names"
+
+blocked=0
+while IFS= read -r path; do
+    case "$path" in
+        .env.example|*/.env.example)
+            ;;
+        .env|.env.*|*/.env|*/.env.*|*.pem|*.key|*.p12|*.mobileprovision|id_rsa|*/id_rsa|credentials.json|*/credentials.json)
+            echo "pre-commit: refusing sensitive file: $path" >&2
+            blocked=1
+            ;;
+        ._*|*/._*)
+            echo "pre-commit: refusing AppleDouble metadata: $path" >&2
+            blocked=1
+            ;;
+        target/*|*/target/*|dist/*|*/dist/*|*.app/*|*/*.app/*)
+            echo "pre-commit: refusing generated build output: $path" >&2
+            blocked=1
+            ;;
+    esac
+done < "$TMP/names"
+
+[ "$blocked" -eq 0 ] || exit 1
+
+git diff --cached --no-ext-diff --unified=0 --diff-filter=ACM -- \
+    | sed -n '/^+++/d; s/^+//p' > "$TMP/added"
+
+if grep -Eq '(AKIA|ASIA)[0-9A-Z]{16}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|-----BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----' "$TMP/added"; then
+    echo "pre-commit: staged content contains a credential or private key" >&2
+    exit 1
+fi
+
+if grep -Eiq '(api[_-]?key|client[_-]?secret|access[_-]?token|password)[[:space:]]*[:=][[:space:]]*[^[:space:]]{8,}' "$TMP/added"; then
+    echo "pre-commit: staged content contains a secret-like assignment" >&2
+    exit 1
+fi
+
+if grep -Eq '/Users/[[:alnum:]_.-]{2,}/|/Volumes/[[:alnum:]][[:alnum:]_. -]{1,}/' "$TMP/added"; then
+    echo "pre-commit: staged content contains a machine-specific absolute path; use a placeholder" >&2
+    exit 1
+fi
+
+grep -Eo '[[:alnum:]._%+-]+@[[:alnum:].-]+\.[[:alpha:]]{2,}' "$TMP/added" \
+    | sort -u > "$TMP/emails" || true
+while IFS= read -r email; do
+    case "$email" in
+        aadithyaraghav@gmail.com|omnibus.type@gmail.com|*@example.com)
+            ;;
+        *)
+            echo "pre-commit: staged content contains an unapproved email address: $email" >&2
+            blocked=1
+            ;;
+    esac
+done < "$TMP/emails"
+
+[ "$blocked" -eq 0 ] || exit 1
+
+echo "pre-commit: staged snapshot passed privacy and secret checks"

@@ -1,0 +1,186 @@
+<p align="center">
+  <img src="assets/icon.svg" width="160" alt="DiskDeck logo">
+</p>
+
+# DiskDeck
+
+See where your disk went. Take it back.
+
+A pure-Rust macOS disk-space visualizer and safe reclaimer built with egui —
+one small native binary, no WebView, GPU-rendered at display refresh rate.
+Memory-safe by construction:
+the scanner threads and the UI share the live tree through atomics and the
+compiler proves there are no data races.
+
+## Why DiskDeck
+
+- **The terrain map grows live during the scan.** File sizes bubble up the
+  tree through atomics the moment they're statted, and the GPU repaints every
+  frame — you watch the disk materialize instead of waiting for a completed
+  scan.
+- **DaisyDisk-style zoom** — drilling into a region animates it expanding to
+  fill the view. Right-click or Esc to go back up.
+- **Verified SSD offload** — move a home-folder item to an external drive,
+  verify the copy, then optionally leave a symlink at the original path.
+- One self-contained native binary; no webview runtime, no bindings layer.
+
+Safety is structural, not advisory:
+- 🟢 safe / 🟡 caution tiers; caution never pre-checked; user files never proposed
+- per-item action choice: Trash (recoverable) ↔ permanent erase; Docker/Go-style
+  reclaims run their exact vetted command, shown verbatim
+- nothing is removed without a ticked checkbox **and** the 900 ms hold
+- trash = instant same-volume rename into `~/.Trash` (no Automation prompt);
+  Finder fallback only
+
+## Installation
+
+**Requirements:** Apple Silicon Mac, macOS 12+. You'll receive
+`DiskDeck.zip` containing the app **and a one-time installer**.
+
+### The easy way (recommended)
+
+1. Unzip. You'll see `DiskDeck.app` and `Install DiskDeck.command`.
+2. **Right-click `Install DiskDeck.command` → Open → Open.** (That
+   right-click is the only Gatekeeper dance you'll ever do.)
+
+The installer then handles everything that used to cause repeated permission
+prompts: it copies the app to /Applications, clears the download-quarantine
+flag, opens System Settings on the **Full Disk Access** pane (toggle
+**DiskDeck** ON — click **+** and pick it from /Applications if it isn't
+listed), and launches the app. Hit **RESCAN** after granting and you're done —
+**macOS never asks again.**
+
+### The manual way
+
+1. Drag `DiskDeck.app` to /Applications.
+2. Right-click the app → Open → Open (or, on newer macOS: System Settings →
+   Privacy & Security → *"DiskDeck" was blocked…* → **Open Anyway**).
+3. In the app, click **FULL DISK ACCESS** (top right), toggle DiskDeck ON,
+   then **RESCAN**.
+
+> **Safety promise:** the scan is read-only. DiskDeck never deletes
+> anything by itself — every removal requires you to tick its checkbox *and*
+> hold the reclaim button for a second. File items go to the **Trash** by
+> default (recoverable until you empty it); only items you explicitly flip to
+> ERASE are removed outright, and command-based reclaims (Docker, Go) show
+> the exact command they run before you arm them.
+
+## Why did it keep asking for permissions before?
+
+macOS ties permission grants to an app's **code signature + bundle id**.
+Unsigned/ad-hoc builds get a new identity every compile, so the system treats
+each rebuild as a brand-new app and re-asks for every folder. DiskDeck is
+signed with a stable certificate and a fixed bundle id
+(`com.buddyhq.headroom-rs`), and the installer adds the one **Full Disk
+Access** grant that supersedes all per-folder prompts. One grant, forever.
+
+## FAQ
+
+**NO ACCESS still shows ~185 after granting Full Disk Access. Why?**
+Two different gates exist. *Privacy permissions* (what FDA clears) guard your
+personal folders — granting it drops the count by a couple hundred. The
+remainder are **root-only system directories** (Spotlight index, filesystem
+journal `.fseventsd`, root's home, audit logs). No app you run can read those,
+by design, and there's nothing reclaimable inside. Hover the NO ACCESS counter
+in-app for this same explanation.
+
+**I reclaimed items but free space didn't move.**
+Trash items don't free space until the Trash is emptied — that's what makes
+them recoverable. Select the **Trash** target and reclaim again (or empty it
+in Finder).
+
+**What does ≈ next to a size mean?**
+Upper bound, not exact — e.g. Docker's number is everything its VM holds;
+the prune removes only the unused part.
+
+**Why is Playwright (or some item) unchecked?**
+🟡 caution items cost a re-download/re-install, so they're never pre-armed.
+Click any row's title to expand what it is, what restoring costs, and exactly
+how it gets removed.
+
+**Does it ever touch my code, photos, documents?**
+No. The reclaim plan only proposes caches, build artifacts, logs, package
+stores, and `node_modules`. Your files appear in the terrain map (that's the
+point) but are never suggested for deletion.
+
+## Controls
+
+| Gesture | Action |
+|---|---|
+| click region | drill in (animated zoom) |
+| right-click / Esc | back up one level |
+| ⌥-click region | reveal in Finder |
+| ⌘-click region | prepare a verified move to an external drive |
+| click rec title | expand explainer |
+| click action chip | toggle → TRASH / ERASE |
+| hold reclaim button 0.9 s | execute the plan |
+
+## Build from source
+
+```sh
+cargo test          # scanner, rules KB, cleaner, offload, and treemap tests
+./make-app.sh       # release build + bundle + codesign + install + dist zip
+cargo run           # dev run (unbundled; FDA grants won't apply to it)
+```
+
+Requires Rust 1.80+. **Ship via `make-app.sh` only** — bare `cargo build`
+output is unsigned, and every unsigned build re-triggers the permission
+prompts described above. The script signs with a stable identity (override
+with `DISKDECK_SIGN_IDENTITY`; the legacy `HEADROOM_SIGN_IDENTITY` override is
+also supported), installs to `/Applications/DiskDeck.app`, and packages
+`dist/DiskDeck.zip` with the recipient installer included.
+
+## Development & maintenance
+
+**Maintainers (human or AI): read [AGENTS.md](AGENTS.md) first.** It carries
+the invariants (vetted-commands-only, the never-change bundle id, the
+rename-first trash ordering, tier policy) and the hard-won egui gotchas —
+most notably the font-fallback/tofu lesson and why the icon has no track arc.
+
+### Tests
+
+| Suite (in-module `#[cfg(test)]`) | What it proves |
+|---|---|
+| `scan.rs` | counts & aggregation, post-scan compaction folds small dirs, hardlinks counted once, denied dirs counted but non-fatal, nested `node_modules` not double-reported |
+| `rules.rs` | KB doctrine on a synthetic tree: tiers, Trash=empty-not-trash, ≥50 MB cache floor + skip-list, Library `node_modules` excluded, safe-before-caution ordering, every rec carries explainers, `~` path prettification |
+| `clean.rs` | quick_du, write-protected delete, empty-keeps-dir, output tailing, command timeout |
+| `offload.rs` | path safety, capacity margin, confirmation gates, verified moves, symlink behavior, event ordering |
+| `treemap.rs` | squarified layout conserves area, stays in bounds, degenerate inputs |
+
+### Release checklist
+
+1. `cargo test` green
+2. `./make-app.sh` (builds, signs, installs, zips with installer)
+3. Launch, scan, spot-check the reclaim plan and the live map
+4. Share `dist/DiskDeck.zip`
+
+### Commit safety
+
+Enable the tracked privacy and secret guard once per clone:
+
+```sh
+git config core.hooksPath .githooks
+scripts/test-pre-commit.sh
+```
+
+The hook rejects credential-shaped strings, private keys, unapproved email
+addresses, machine-specific absolute paths, AppleDouble metadata, `.env`
+files, app bundles, and generated build output.
+
+## Project history
+
+Born 2026-06-12 after a manual cleanup session recovered ~70 GB. Parked v2
+ideas: regrowth tracking between scans, Docker deep-dive panel, APFS snapshot/purgeable
+accounting, app-leftover detection, menu-bar free-space readout.
+
+Fonts: Saira Condensed (SIL OFL, see `assets/fonts/OFL.txt`); numerals use
+egui's built-in Hack.
+
+Brand sources: `assets/logo.svg` is the transparent standalone mark;
+`assets/icon.svg` is the macOS app-icon composition. `assets/icon.png` and
+`assets/DiskDeck.icns` are rendered outputs.
+
+## License
+
+DiskDeck is dual-licensed under your choice of the
+[MIT license](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE).
