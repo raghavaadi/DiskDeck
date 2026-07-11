@@ -1,0 +1,47 @@
+name: Feature request
+description: Propose a focused improvement to DiskDeck
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: What is difficult today, and who encounters it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Proposed workflow
+      description: Describe what the user would see and control.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: safety
+    attributes:
+      label: Safety impact
+      options:
+        - Read-only presentation or scan change
+        - New cleanup recommendation
+        - Cleanup, Trash, erase, or command behavior
+        - Offload or symlink behavior
+        - Unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include current workarounds or a smaller version of the idea.
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This request does not require DiskDeck to recommend user documents, source code, photos, or media for deletion.
+          required: true

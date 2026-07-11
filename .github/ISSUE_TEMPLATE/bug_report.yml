@@ -1,0 +1,82 @@
+name: Bug report
+description: Report reproducible incorrect or unsafe DiskDeck behavior
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Remove personal paths and disk contents from screenshots or Activity output before submitting.
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "macOS 15.5"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build
+    attributes:
+      label: DiskDeck build
+      options:
+        - Installed signed application
+        - Local make-app.sh build
+        - cargo run development binary
+        - Other source build
+    validations:
+      required: true
+
+  - type: dropdown
+    id: fda
+    attributes:
+      label: Full Disk Access state
+      description: Is DiskDeck enabled in System Settings → Privacy & Security → Full Disk Access?
+      options:
+        - Enabled
+        - Disabled
+        - Unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: List the smallest repeatable sequence. Do not test destructive actions on real data.
+      placeholder: |
+        1. Launch the installed app
+        2. Start or finish a scan
+        3. Open ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: activity
+    attributes:
+      label: Sanitized Activity output
+      description: Paste only relevant lines after removing personal paths or filenames.
+      render: text
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I removed private paths, filenames, credentials, and unrelated disk contents from this report.
+          required: true

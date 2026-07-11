@@ -1,0 +1,59 @@
+# Contributing to DiskDeck
+
+Thanks for helping make disk cleanup safer and easier to understand. DiskDeck is a native macOS application written in Rust with egui/eframe.
+
+## Before you start
+
+- Use an Apple Silicon Mac running macOS 12 or later.
+- Install a current stable Rust toolchain with `rustfmt`.
+- Read [AGENTS.md](AGENTS.md) before changing scanner, cleanup, offload, bundle, signing, or UI behavior. Its invariants are part of the product's safety model.
+- Open an issue before a large feature or a new crate dependency so the scope can be agreed first.
+
+Enable the repository guards once per clone:
+
+```sh
+git config core.hooksPath .githooks
+scripts/test-pre-commit.sh
+scripts/test-pre-push.sh
+```
+
+## Development loop
+
+```sh
+cargo test --locked
+cargo fmt -- --check
+cargo run
+```
+
+`cargo run` is for development only. It has a different macOS TCC identity from the signed application, so Full Disk Access granted to `/Applications/DiskDeck.app` does not apply to the development binary.
+
+For UI work, use the actual ship path and inspect the signed application in both macOS appearances:
+
+```sh
+./make-app.sh
+```
+
+Do not share or commit the generated app, ZIP, `target`, `dist`, or AppleDouble `._*` files.
+
+## Safety expectations
+
+- Scanning stays read-only.
+- Nothing is removed without an explicitly selected recommendation and the 900 ms hold.
+- Command recommendations execute only the fixed vetted command stored in `rules.rs`.
+- Safe recommendations may be preselected; caution recommendations never are.
+- User documents, source code, photos, and media are never recommended for cleanup.
+- The scan root stays `/System/Volumes/Data`, and the bundle identifier stays `com.buddyhq.headroom-rs`.
+
+Never test permanent deletion or command cleanup against real user data. Use fixture directories, or at most the smallest recoverable safe-tier Trash action described in `AGENTS.md`.
+
+## Pull requests
+
+Keep each pull request focused. Include:
+
+- what user-visible or safety boundary changed;
+- the exact test commands and results;
+- tests for new logic or regressions;
+- signed-app screenshots for UI changes, sanitized so no private desktop or path data is visible;
+- an explanation for any new dependency.
+
+Use an imperative commit subject. The commit body should explain why the change is needed when the reason is not obvious from the diff.
