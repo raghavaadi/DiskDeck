@@ -1,6 +1,7 @@
 //! The DiskDeck application: top bar, capacity gauge, scan telemetry,
 //! live terrain map, reclaim plan with hold-to-reclaim, ops feed.
 
+use crate::apfs::{self, ApfsAccounting};
 use crate::clean::{
     fmt_bytes, fmt_count, open_full_disk_access, reveal_in_finder, run_clean, CleanEvent, CleanJob,
 };
@@ -84,14 +85,17 @@ enum RailView {
     Moved,
     Growth,
     Developer,
+    Apfs,
 }
 
 fn rail_back_target(view: RailView) -> Option<RailView> {
     match view {
         RailView::Summary => None,
-        RailView::Reclaim | RailView::Moved | RailView::Growth | RailView::Developer => {
-            Some(RailView::Summary)
-        }
+        RailView::Reclaim
+        | RailView::Moved
+        | RailView::Growth
+        | RailView::Developer
+        | RailView::Apfs => Some(RailView::Summary),
     }
 }
 
@@ -135,6 +139,9 @@ pub struct App {
     growth_watch_rx: Option<Receiver<Result<GrowthWatch, String>>>,
     growth_watch: GrowthWatch,
     growth_watch_error: Option<String>,
+    apfs_rx: Option<Receiver<Result<ApfsAccounting, String>>>,
+    apfs: Option<ApfsAccounting>,
+    apfs_error: Option<String>,
 }
 
 fn now_hms() -> String {
@@ -281,6 +288,9 @@ impl App {
             growth_watch_rx: None,
             growth_watch: GrowthWatch::default(),
             growth_watch_error: None,
+            apfs_rx: None,
+            apfs: None,
+            apfs_error: None,
         }
     }
 
@@ -506,6 +516,48 @@ impl App {
                 self.ops(
                     OpsKind::Amber,
                     format!("Growth Watch unavailable — {error}"),
+                );
+            }
+        }
+    }
+
+    fn begin_apfs_refresh(&mut self) {
+        if self.apfs_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("apfs-accounting".into())
+            .spawn(move || {
+                let _ = tx.send(apfs::load());
+            }) {
+            Ok(_) => {
+                self.apfs_rx = Some(rx);
+                self.apfs_error = None;
+            }
+            Err(error) => self.apfs_error = Some(format!("start APFS accounting: {error}")),
+        }
+    }
+
+    fn poll_apfs(&mut self) {
+        let result = match self.apfs_rx.as_ref().map(Receiver::try_recv) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Some(Err("APFS worker stopped before reporting".into()))
+            }
+        };
+        self.apfs_rx = None;
+        match result.unwrap() {
+            Ok(accounting) => {
+                self.apfs = Some(accounting);
+                self.apfs_error = None;
+            }
+            Err(error) => {
+                self.apfs_error = Some(error.clone());
+                self.ops(
+                    OpsKind::Amber,
+                    format!("APFS accounting unavailable — {error}"),
                 );
             }
         }
@@ -952,6 +1004,7 @@ mod tests {
             rail_back_target(RailView::Developer),
             Some(RailView::Summary)
         );
+        assert_eq!(rail_back_target(RailView::Apfs), Some(RailView::Summary));
     }
 
     #[test]
@@ -1238,6 +1291,7 @@ impl eframe::App for App {
             self.begin_scan();
             self.begin_move_refresh();
             self.begin_growth_refresh();
+            self.begin_apfs_refresh();
         }
         if self.scan_done() && !self.recs_built {
             self.on_scan_finished();
@@ -1248,6 +1302,7 @@ impl eframe::App for App {
         self.poll_moves();
         self.poll_restore();
         self.poll_growth_watch();
+        self.poll_apfs();
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             if self.restore_dialog.take().is_some() {
                 self.restore_hold = 0.0;
@@ -1272,6 +1327,7 @@ impl eframe::App for App {
             || self.restoring
             || self.restore_dialog.is_some()
             || self.growth_watch_rx.is_some()
+            || self.apfs_rx.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(40));
         }
@@ -1952,6 +2008,10 @@ impl App {
                 self.draw_developer_lens(ui, rect);
                 return;
             }
+            RailView::Apfs => {
+                self.draw_apfs_accounting(ui, rect);
+                return;
+            }
             RailView::Reclaim => {}
         }
 
@@ -2214,6 +2274,28 @@ impl App {
                 .clicked()
             {
                 self.rail_view = RailView::Developer;
+            }
+        });
+        let apfs_rect = Rect::from_min_size(
+            pos2(rect.min.x, developer_rect.max.y + 8.0),
+            vec2(rect.width(), 34.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(apfs_rect), |ui| {
+            let button = egui::Button::new(
+                RichText::new("APFS accounting")
+                    .font(theme::display_md(10.5))
+                    .color(palette.accent),
+            )
+            .fill(palette.surface)
+            .stroke(Stroke::new(1.0, palette.edge_soft))
+            .rounding(Rounding::same(8.0));
+            if ui
+                .add_sized(ui.available_size(), button)
+                .on_hover_text("Separate measured container capacity from system-managed space")
+                .clicked()
+            {
+                self.rail_view = RailView::Apfs;
+                self.begin_apfs_refresh();
             }
         });
 
@@ -2848,6 +2930,154 @@ impl App {
                         ui.add_space(6.0);
                     }
                 });
+        });
+    }
+
+    fn draw_apfs_accounting(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let meta = self
+            .apfs
+            .as_ref()
+            .map(|value| format!("{} container", fmt_bytes(value.container_size)))
+            .unwrap_or_else(|| "read-only".into());
+        let content = panel_chrome(ui, rect, "APFS accounting", Some((meta, palette.faint)));
+        let nav = Rect::from_min_size(
+            content.min + vec2(10.0, 4.0),
+            vec2(content.width() - 20.0, 30.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(nav), |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("← Reclaim summary")
+                                .font(theme::display_md(10.5))
+                                .color(palette.accent),
+                        )
+                        .frame(false),
+                    )
+                    .clicked()
+                {
+                    self.rail_view = RailView::Summary;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            self.apfs_rx.is_none(),
+                            egui::Button::new(
+                                RichText::new(if self.apfs_rx.is_some() {
+                                    "Refreshing…"
+                                } else {
+                                    "Refresh"
+                                })
+                                .font(theme::mono(9.5)),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.begin_apfs_refresh();
+                    }
+                });
+            });
+        });
+        let body = Rect::from_min_max(
+            pos2(content.min.x + 10.0, nav.max.y + 6.0),
+            pos2(content.max.x - 10.0, content.max.y - 4.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(body), |ui| {
+            if let Some(error) = &self.apfs_error {
+                ui.label(
+                    RichText::new(format!("APFS accounting unavailable\n{error}"))
+                        .font(theme::body(10.5))
+                        .color(palette.danger),
+                );
+                return;
+            }
+            let Some(value) = &self.apfs else {
+                ui.label(
+                    RichText::new("Reading fixed APFS container values from macOS…")
+                        .font(theme::body(10.5))
+                        .color(palette.muted),
+                );
+                return;
+            };
+            let used = value.container_size.saturating_sub(value.container_free);
+            ui.label(
+                RichText::new(
+                    "APFS shares one container across system volumes. These values are accounting facts, not cleanup recommendations.",
+                )
+                .font(theme::body(10.0))
+                .color(palette.muted),
+            );
+            ui.add_space(10.0);
+            for (label, amount, color) in [
+                ("Container capacity", fmt_bytes(value.container_size), palette.ink),
+                ("Container used", fmt_bytes(used), palette.caution),
+                ("Container free", fmt_bytes(value.container_free), palette.safe),
+            ] {
+                Frame::none()
+                    .fill(palette.surface)
+                    .stroke(Stroke::new(1.0, palette.edge_soft))
+                    .rounding(Rounding::same(8.0))
+                    .inner_margin(Margin::symmetric(10.0, 9.0))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(label)
+                                    .font(theme::body(10.5))
+                                    .color(palette.muted),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(amount)
+                                            .font(theme::display_md(11.5))
+                                            .color(color),
+                                    );
+                                },
+                            );
+                        });
+                    });
+                ui.add_space(6.0);
+            }
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(format!(
+                    "LOCAL SNAPSHOTS  ·  {}",
+                    value
+                        .snapshot_count
+                        .map(|count| count.to_string())
+                        .unwrap_or_else(|| "unavailable".into())
+                ))
+                .font(theme::display_md(10.0))
+                .color(palette.accent),
+            );
+            ui.label(
+                RichText::new(if value.snapshot_bytes.is_some() {
+                    "Snapshot byte size is measured separately."
+                } else {
+                    "Exact snapshot byte size is not reliably reported by macOS, so DiskDeck does not add it to reclaimable space."
+                })
+                .font(theme::body(9.5))
+                .color(palette.muted),
+            );
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("PURGEABLE CAPACITY  ·  NOT RELIABLY REPORTED")
+                    .font(theme::display_md(10.0))
+                    .color(palette.caution),
+            );
+            ui.label(
+                RichText::new(if value.purgeable_bytes.is_some() {
+                    "macOS supplied a purgeable estimate; it is still system-managed."
+                } else {
+                    "DiskDeck will not invent a purgeable number or claim that system-managed capacity can be freed immediately."
+                })
+                .font(theme::body(9.5))
+                .color(palette.muted),
+            );
         });
     }
 

@@ -120,6 +120,13 @@ on run argv
                 delay 0.5
                 if not (exists button "← Reclaim summary" of appGroup) then error "Developer Lens rail did not open." number 1
                 return "PASS: Developer Lens rail available"
+            else if commandName is "apfs-accounting-visible" then
+                if not (exists button "APFS accounting" of appGroup) then error "APFS accounting control is unavailable." number 1
+                click button "APFS accounting" of appGroup
+                delay 0.5
+                if not (exists button "← Reclaim summary" of appGroup) then error "APFS accounting rail did not open." number 1
+                if not (exists button "Refresh" of appGroup) then error "APFS Refresh control is unavailable." number 1
+                return "PASS: APFS accounting rail available"
             else if commandName is "escape" then
                 key code 53
                 return "PASS: Escape sent"
@@ -132,7 +139,7 @@ on run argv
                 if afterSignature is beforeSignature then error "Back did not change the breadcrumb." number 1
                 return "PASS: Back navigation"
             else
-                error "Usage: ui-smoke.applescript check|signature|tile-center|menu-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|escape|back" number 1
+                error "Usage: ui-smoke.applescript check|signature|tile-center|menu-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|escape|back" number 1
             end if
         end tell
     end tell

@@ -50,4 +50,6 @@ ui growth-watch-visible
 ui escape
 ui developer-lens-visible
 ui escape
+ui apfs-accounting-visible
+ui escape
 echo "signed UI smoke check passed"

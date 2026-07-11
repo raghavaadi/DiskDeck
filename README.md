@@ -27,6 +27,10 @@ compiler proves there are no data races.
   simulators, node_modules, package stores, and build tooling. It reuses the
   deterministic reclaim findings, never uploads project names or paths, and
   never changes selection defaults.
+- **Honest APFS accounting** — separate measured container capacity/free
+  space and local snapshot count from file recommendations. Snapshot byte size
+  and purgeable capacity stay explicitly unavailable when macOS does not
+  report reliable exact values; neither is advertised as reclaimable.
 - **DaisyDisk-style zoom** — drilling into a region animates it expanding to
   fill the view. A visible Back button and clickable breadcrumbs make the
   route home obvious.
@@ -153,6 +157,7 @@ point) but are never suggested for deletion.
 | click Moved items | inspect offloaded items and their restore readiness |
 | click Growth Watch | inspect retained scan trends and recurring growers |
 | click Developer Lens | explain measured developer storage by tool family |
+| click APFS accounting | inspect container capacity and snapshot accounting |
 | click Watch / Unwatch | update the local folder watchlist |
 | click Restore to Mac… | review why an item can or cannot be restored |
 | hold restore button 0.9 s | restore one acknowledged, preflighted item |
@@ -193,6 +198,7 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 | `clean.rs` | quick_du, write-protected delete, empty-keeps-dir, output tailing, command timeout |
 | `history.rs` | lossless snapshot/watchlist codecs, corruption handling, compact-tree capture, comparison threshold/order, recurring-growth timeline, atomic retention without touching unrelated files |
 | `developer.rs` | deterministic grouping, stable ordering, totals, Caution counts, and exclusion of ordinary cleanup rows |
+| `apfs.rs` | fixed-command APFS plist parsing, bounded values, snapshot count, and timeout/failure behavior |
 | `transfer.rs` | shared collision, filesystem-identity, apparent-size, and verified-copy primitives |
 | `offload.rs` | protected-path policy, worker revalidation, destination collision, source identity, capacity margin, verified moves, symlink behavior, local move-record persistence, event ordering |
 | `moves.rs` | lossless registry codec, atomic bounded storage, legacy-ledger import, health classification, restore preflight, rollback, and worker events |
