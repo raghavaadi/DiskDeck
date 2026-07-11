@@ -31,6 +31,7 @@ workflow="$ROOT/.github/workflows/ci.yml"
 for expected in \
     'permissions:' \
     'contents: read' \
+    'workflow_dispatch:' \
     'runs-on: macos-14' \
     'cargo fmt -- --check' \
     'scripts/test-pre-commit.sh' \
