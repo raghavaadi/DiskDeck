@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use crate::clean::{delete_path, quick_du};
+use crate::moves::{registry_path_for_home, upsert_record, MoveRecord};
 use crate::transfer::{
     apparent_size, ensure_absent, ensure_same_identity, path_identity, verified_ditto_copy,
 };
@@ -246,6 +247,7 @@ pub struct MoveOutcome {
     pub dest: PathBuf,
     pub reclaimed: i64,
     pub symlinked: bool,
+    pub moved_at: i64,
 }
 
 /// Verified cross-volume move. Order is the safety contract:
@@ -273,24 +275,25 @@ pub fn perform_move(
     }
 
     // 5. ledger
-    append_ledger(ledger_path, src, dest, symlinked);
+    let moved_at = unsafe { libc::time(std::ptr::null_mut()) };
+    append_ledger(ledger_path, src, dest, moved_at, symlinked);
 
     Ok(MoveOutcome {
         dest: dest.to_path_buf(),
         reclaimed: total,
         symlinked,
+        moved_at,
     })
 }
 
 /// Append one JSON line recording the move. Hand-rolled (no serde dependency).
-fn append_ledger(ledger_path: &Path, origin: &Path, dest: &Path, symlinked: bool) {
+fn append_ledger(ledger_path: &Path, origin: &Path, dest: &Path, moved_at: i64, symlinked: bool) {
     use std::io::Write;
-    let ts = unsafe { libc::time(std::ptr::null_mut()) };
     let line = format!(
         "{{\"origin\":{},\"dest\":{},\"moved_at\":{},\"symlinked\":{}}}\n",
         json_str(&origin.to_string_lossy()),
         json_str(&dest.to_string_lossy()),
-        ts,
+        moved_at,
         symlinked
     );
     if let Some(parent) = ledger_path.parent() {
@@ -342,6 +345,7 @@ pub enum OffloadEvent {
         reclaimed: i64,
         dest: PathBuf,
         symlinked: bool,
+        registry_warning: Option<String>,
     },
     Failed {
         error: String,
@@ -368,6 +372,17 @@ fn check_target(mount_path: &Path, item_size: i64) -> Result<(), String> {
         return Err("target no longer has enough free space for this move".into());
     }
     Ok(())
+}
+
+fn persist_move_record(home: &Path, origin: &Path, outcome: &MoveOutcome) -> Option<String> {
+    let record = MoveRecord::new(
+        origin.to_path_buf(),
+        outcome.dest.clone(),
+        outcome.moved_at,
+        outcome.reclaimed,
+        outcome.symlinked,
+    );
+    upsert_record(&registry_path_for_home(home), record).err()
 }
 
 /// Run one offload on a background thread, streaming events to the UI.
@@ -407,10 +422,12 @@ pub fn run_offload(job: OffloadJob, tx: Sender<OffloadEvent>) {
                 .join(".diskdeck-offload.json");
             match perform_move(&job.src, &dest, &ledger, job.leave_symlink) {
                 Ok(o) => {
+                    let registry_warning = persist_move_record(&job.home, &job.src, &o);
                     let _ = tx.send(OffloadEvent::Done {
                         reclaimed: o.reclaimed,
                         dest: o.dest,
                         symlinked: o.symlinked,
+                        registry_warning,
                     });
                 }
                 Err(e) => {
@@ -424,6 +441,7 @@ pub fn run_offload(job: OffloadJob, tx: Sender<OffloadEvent>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::moves::{load_records, registry_path_for_home};
     use std::fs;
 
     #[test]
@@ -659,6 +677,32 @@ mod tests {
             b"payload",
             "symlink resolves to dest"
         );
+    }
+
+    #[test]
+    fn successful_offload_persists_the_exact_local_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let src = home.join("Movies/clip.mov");
+        let dest = tmp.path().join("volume/DiskDeck Offload/clip.mov");
+        let external_ledger = tmp
+            .path()
+            .join("volume/DiskDeck Offload/.diskdeck-offload.json");
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::write(&src, b"payload").unwrap();
+
+        let outcome = perform_move(&src, &dest, &external_ledger, true).unwrap();
+        let registry_warning = persist_move_record(&home, &src, &outcome);
+
+        assert!(registry_warning.is_none());
+        let records = load_records(&registry_path_for_home(&home)).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].origin, src);
+        assert_eq!(records[0].dest, dest);
+        assert_eq!(records[0].moved_at, outcome.moved_at);
+        assert!(records[0].bytes > 0);
+        assert!(records[0].symlinked);
+        assert_eq!(records[0].restored_at, None);
     }
 
     #[test]

@@ -418,6 +418,7 @@ impl App {
                     reclaimed,
                     dest,
                     symlinked,
+                    registry_warning,
                 } => {
                     self.offloading = false;
                     self.offload_rx = None;
@@ -433,6 +434,14 @@ impl App {
                         ""
                     };
                     self.ops(OpsKind::Ok, format!("✓ moved to {}{tail}", dest.display()));
+                    if let Some(error) = registry_warning {
+                        self.ops(
+                            OpsKind::Amber,
+                            format!(
+                                "move completed, but Restore Center could not record it — {error}"
+                            ),
+                        );
+                    }
                     self.ops(OpsKind::Dim, "rescan to refresh the terrain map");
                 }
                 OffloadEvent::Failed { error } => {
