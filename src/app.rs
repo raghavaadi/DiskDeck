@@ -11,6 +11,7 @@ use crate::history::{
     GrowthWatch, HistoryEvent, TimelinePoint,
 };
 use crate::leftovers::{self, LeftoverFinding};
+use crate::monitor::{self, MenuBarItem, MonitorSettings};
 use crate::moves::{
     can_confirm_restore, refresh_records, registry_path_for_home, restore_block, run_restore,
     state_reason, MoveState, MovedItem, RestoreBlock, RestoreEvent, RestoreJob, RestoreRoots,
@@ -89,6 +90,7 @@ enum RailView {
     Developer,
     Apfs,
     Leftovers,
+    Monitor,
 }
 
 fn rail_back_target(view: RailView) -> Option<RailView> {
@@ -99,7 +101,8 @@ fn rail_back_target(view: RailView) -> Option<RailView> {
         | RailView::Growth
         | RailView::Developer
         | RailView::Apfs
-        | RailView::Leftovers => Some(RailView::Insights),
+        | RailView::Leftovers
+        | RailView::Monitor => Some(RailView::Insights),
     }
 }
 
@@ -149,6 +152,11 @@ pub struct App {
     leftovers_rx: Option<Receiver<Result<Vec<LeftoverFinding>, String>>>,
     leftovers: Vec<LeftoverFinding>,
     leftovers_error: Option<String>,
+    monitor_settings: MonitorSettings,
+    menu_bar_item: Option<MenuBarItem>,
+    monitor_updated_at: Instant,
+    monitor_low: bool,
+    monitor_error: Option<String>,
 }
 
 fn now_hms() -> String {
@@ -257,6 +265,21 @@ fn draw_growth_sparkline(ui: &egui::Ui, rect: Rect, points: &[TimelinePoint]) {
 
 impl App {
     pub fn new() -> Self {
+        let stats = disk_stats();
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let (monitor_settings, monitor_error) = match monitor::load(&monitor::settings_path(&home))
+        {
+            Ok(settings) => (settings, None),
+            Err(error) => (MonitorSettings::default(), Some(error)),
+        };
+        let monitor_low = monitor::is_low(stats.free, monitor_settings.threshold_gb);
+        let menu_bar_item = monitor_settings.enabled.then(|| {
+            let item = MenuBarItem::new();
+            item.update(stats.free, monitor_low);
+            item
+        });
         App {
             scan: None,
             view: None,
@@ -272,7 +295,7 @@ impl App {
                 text: "diskdeck v1.0 — feed online. nothing is ever removed without your explicit selection.".into(),
                 kind: OpsKind::Dim,
             }],
-            stats: disk_stats(),
+            stats,
             stats_at: Instant::now(),
             stamp: None,
             booted: false,
@@ -301,6 +324,11 @@ impl App {
             leftovers_rx: None,
             leftovers: Vec::new(),
             leftovers_error: None,
+            monitor_settings,
+            menu_bar_item,
+            monitor_updated_at: Instant::now(),
+            monitor_low,
+            monitor_error,
         }
     }
 
@@ -615,6 +643,82 @@ impl App {
                 );
             }
         }
+    }
+
+    fn apply_monitor_settings(&mut self, next: MonitorSettings) {
+        let home = Self::home_dir();
+        let launch_changed = next.launch_at_login != self.monitor_settings.launch_at_login;
+        if launch_changed {
+            if let Err(error) = monitor::set_launch_at_login(&home, next.launch_at_login) {
+                self.monitor_error = Some(error.clone());
+                self.ops(
+                    OpsKind::Err,
+                    format!("menu monitor settings failed — {error}"),
+                );
+                return;
+            }
+        }
+        if let Err(error) = monitor::save(&monitor::settings_path(&home), next) {
+            if launch_changed {
+                let _ = monitor::set_launch_at_login(&home, self.monitor_settings.launch_at_login);
+            }
+            self.monitor_error = Some(error.clone());
+            self.ops(
+                OpsKind::Err,
+                format!("menu monitor settings failed — {error}"),
+            );
+            return;
+        }
+        self.monitor_settings = next;
+        self.monitor_low = monitor::is_low(self.stats.free, next.threshold_gb);
+        if next.enabled {
+            if self.menu_bar_item.is_none() {
+                self.menu_bar_item = Some(MenuBarItem::new());
+            }
+            if let Some(item) = &self.menu_bar_item {
+                item.update(self.stats.free, self.monitor_low);
+            }
+        } else {
+            self.menu_bar_item = None;
+        }
+        self.monitor_updated_at = Instant::now();
+        self.monitor_error = None;
+        self.ops(
+            OpsKind::Info,
+            format!(
+                "menu-bar monitor {}{}",
+                if next.enabled { "enabled" } else { "disabled" },
+                if next.launch_at_login {
+                    " · launch at login enabled"
+                } else {
+                    ""
+                }
+            ),
+        );
+    }
+
+    fn update_menu_monitor(&mut self) {
+        if !self.monitor_settings.enabled
+            || self.monitor_updated_at.elapsed() < Duration::from_secs(300)
+        {
+            return;
+        }
+        let low = monitor::is_low(self.stats.free, self.monitor_settings.threshold_gb);
+        if let Some(item) = &self.menu_bar_item {
+            item.update(self.stats.free, low);
+        }
+        if low && !self.monitor_low {
+            self.ops(
+                OpsKind::Amber,
+                format!(
+                    "low space — {} free, below the {} GB local warning threshold",
+                    fmt_bytes(self.stats.free),
+                    self.monitor_settings.threshold_gb
+                ),
+            );
+        }
+        self.monitor_low = low;
+        self.monitor_updated_at = Instant::now();
     }
 
     fn poll_clean_events(&mut self) {
@@ -1067,6 +1171,10 @@ mod tests {
             rail_back_target(RailView::Leftovers),
             Some(RailView::Insights)
         );
+        assert_eq!(
+            rail_back_target(RailView::Monitor),
+            Some(RailView::Insights)
+        );
     }
 
     #[test]
@@ -1379,6 +1487,7 @@ impl eframe::App for App {
             self.stats = disk_stats();
             self.stats_at = Instant::now();
         }
+        self.update_menu_monitor();
         if self.scanning()
             || self.cleaning
             || self.zoom.is_some()
@@ -2084,6 +2193,10 @@ impl App {
                 self.draw_app_leftovers(ui, rect);
                 return;
             }
+            RailView::Monitor => {
+                self.draw_menu_monitor(ui, rect);
+                return;
+            }
             RailView::Reclaim => {}
         }
 
@@ -2420,6 +2533,15 @@ impl App {
                 "App leftovers",
                 format!("{} evidence-backed finding(s)", self.leftovers.len()),
                 RailView::Leftovers,
+            ),
+            (
+                "Menu-bar monitor",
+                if self.monitor_settings.enabled {
+                    "Enabled · five-minute updates".into()
+                } else {
+                    "Off · opt in explicitly".into()
+                },
+                RailView::Monitor,
             ),
         ];
         let mut open = None;
@@ -3300,6 +3422,119 @@ impl App {
         });
         if let Some(path) = reveal {
             reveal_in_finder(&path);
+        }
+    }
+
+    fn draw_menu_monitor(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let status = if self.monitor_settings.enabled {
+            "enabled"
+        } else {
+            "off"
+        };
+        let content = panel_chrome(
+            ui,
+            rect,
+            "Menu-bar monitor",
+            Some((status.into(), palette.faint)),
+        );
+        let nav = Rect::from_min_size(
+            content.min + vec2(10.0, 4.0),
+            vec2(content.width() - 20.0, 30.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(nav), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("← Insights")
+                            .font(theme::display_md(10.5))
+                            .color(palette.accent),
+                    )
+                    .frame(false),
+                )
+                .clicked()
+            {
+                self.rail_view = RailView::Insights;
+            }
+        });
+        let body = Rect::from_min_max(
+            pos2(content.min.x + 10.0, nav.max.y + 7.0),
+            pos2(content.max.x - 10.0, content.max.y - 4.0),
+        );
+        let mut next = self.monitor_settings;
+        let mut changed = false;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(body), |ui| {
+            ui.label(
+                RichText::new(
+                    "A native menu-bar free-space readout updated every five minutes. It uses statfs only and never starts a disk scan.",
+                )
+                .font(theme::body(10.0))
+                .color(palette.muted),
+            );
+            ui.add_space(10.0);
+            changed |= ui
+                .checkbox(&mut next.enabled, "Show free space in the menu bar")
+                .changed();
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Low-space warning below")
+                        .font(theme::body(10.0))
+                        .color(palette.muted),
+                );
+                egui::ComboBox::from_id_salt("monitor-threshold")
+                    .selected_text(format!("{} GB", next.threshold_gb))
+                    .show_ui(ui, |ui| {
+                        for value in [5, 10, 15, 20, 30, 50, 100] {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut next.threshold_gb,
+                                    value,
+                                    format!("{value} GB"),
+                                )
+                                .changed();
+                        }
+                    });
+            });
+            ui.label(
+                RichText::new(format!(
+                    "Current free space: {}{}",
+                    fmt_bytes(self.stats.free),
+                    if monitor::is_low(self.stats.free, next.threshold_gb) {
+                        " · below threshold"
+                    } else {
+                        ""
+                    }
+                ))
+                .font(theme::mono(9.5))
+                .color(if monitor::is_low(self.stats.free, next.threshold_gb) {
+                    palette.caution
+                } else {
+                    palette.safe
+                }),
+            );
+            ui.add_space(14.0);
+            changed |= ui
+                .checkbox(&mut next.launch_at_login, "Launch DiskDeck at login")
+                .changed();
+            ui.label(
+                RichText::new(
+                    "Separate opt-in. This installs a user-owned LaunchAgent for /Applications/DiskDeck.app; no privileged daemon.",
+                )
+                .font(theme::body(9.0))
+                .color(palette.faint),
+            );
+            if let Some(error) = &self.monitor_error {
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new(error)
+                        .font(theme::body(9.5))
+                        .color(palette.danger),
+                );
+            }
+        });
+        if changed {
+            self.apply_monitor_settings(next);
         }
     }
 

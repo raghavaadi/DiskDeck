@@ -54,4 +54,6 @@ ui apfs-accounting-visible
 ui escape
 ui app-leftovers-visible
 ui escape
+ui menu-monitor-visible
+ui escape
 echo "signed UI smoke check passed"

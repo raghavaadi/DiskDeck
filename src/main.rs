@@ -6,6 +6,7 @@ mod clean;
 mod developer;
 mod history;
 mod leftovers;
+mod monitor;
 mod moves;
 mod offload;
 mod rules;
