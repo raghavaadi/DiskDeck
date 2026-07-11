@@ -18,6 +18,8 @@ compiler proves there are no data races.
   tree through atomics the moment they're statted, and the GPU repaints every
   frame — you watch the disk materialize instead of waiting for a completed
   scan.
+- **See what grew** — completed scans keep a compact local baseline and show
+  the total change plus the largest ≥10 MB growers on the next scan.
 - **DaisyDisk-style zoom** — drilling into a region animates it expanding to
   fill the view. A visible Back button and clickable breadcrumbs make the
   route home obvious.
@@ -41,6 +43,8 @@ Safety is structural, not advisory:
   Finder fallback only
 - SSD moves refuse an existing destination and recheck the original's
   filesystem identity immediately before removal
+- scan history stays local under DiskDeck's Application Support directory;
+  only the 12 newest compact completed-scan snapshots are retained
 
 ## Installation
 
@@ -160,6 +164,7 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 | `scan.rs` | counts & aggregation, post-scan compaction folds small dirs, hardlinks counted once, denied dirs counted but non-fatal, nested `node_modules` not double-reported |
 | `rules.rs` | KB doctrine on a synthetic tree: tiers, Trash=empty-not-trash, ≥50 MB cache floor + skip-list, Library `node_modules` excluded, safe-before-caution ordering, every rec carries explainers, `~` path prettification |
 | `clean.rs` | quick_du, write-protected delete, empty-keeps-dir, output tailing, command timeout |
+| `history.rs` | lossless snapshot codec, corruption handling, compact-tree capture, comparison threshold/order, atomic retention without touching unrelated files |
 | `offload.rs` | protected-path policy, worker revalidation, destination collision, source identity, capacity margin, verified moves, symlink behavior, event ordering |
 | `treemap.rs` | squarified layout conserves area, stays in bounds, degenerate inputs |
 

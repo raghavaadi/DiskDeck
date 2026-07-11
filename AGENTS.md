@@ -32,6 +32,11 @@ changing anything; most lines exist because something broke.
    refuses an existing destination and rechecks source device/inode before
    deletion. Never bypass these layers from UI code or add an override for
    Library, hidden, cloud-sync, app-bundle, or managed-library paths.
+8. **History records completed truth only.** `history::record_scan` starts only
+   after `ScanState::Done`, when `compact()` has finished. Never persist live
+   or aborted trees, never move snapshot I/O onto the UI thread, and never
+   upload history. Retention may delete only matching `snapshot-*.ddhist`
+   files inside DiskDeck's Application Support History directory.
 
 ## Build & ship
 
@@ -66,6 +71,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 | `scan.rs` | rayon parallel walker; `Arc<Node>` tree; **atomic size bubbling up the ancestor chain so the UI renders the tree WHILE it grows** (the headline feature) | post-scan `compact()` folds dirs <10 MB into parent aggregates; files <100 MB are never materialized as nodes |
 | `rules.rs` | safety KB → `Vec<Rec>`; port of the proven Go doctrine | overlap control: caches with dedicated rules are in the `skip` list so generic `~/Library/Caches` enumeration doesn't double-report; recs carry data-volume paths — fs ops go through `strip_data_root` |
 | `clean.rs` | trash/delete/empty/command executors + background orchestrator (mpsc events) | **trash = `os::rename` into `~/.Trash` FIRST** — Finder-osascript hangs silently without the Automation TCC grant and is fallback only; `delete_path` chmods-and-retries for write-protected trees (go-modcache style) |
+| `history.rs` | compact completed-scan snapshots, binary codec, previous-scan comparison, atomic retention worker | raw path bytes must round-trip; corrupt snapshots are skipped; unrelated Application Support files are never pruned |
 | `offload.rs` | protected-path policy, external-volume checks, verified copy/move, ledger, worker events | UI eligibility is advisory; the worker must repeat full policy/target/capacity checks, and only a matching source identity may reach `delete_path` |
 | `treemap.rs` | squarified layout + paint + zoom-from animation | caps at 40 rects + synthetic "smaller items" aggregate |
 | `app.rs` | egui panels, gauge, telemetry, rec cards, hold-button, ops feed | `request_repaint_after(40ms)` only while scanning/cleaning/animating — don't repaint unconditionally |
@@ -141,7 +147,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 
 ## Repo conventions
 
-- Flat module layout (`scan/rules/clean/offload/treemap/theme/app`), one concern per
+- Flat module layout (`scan/rules/clean/history/offload/treemap/theme/app`), one concern per
   file. No new crate dependencies without strong reason.
 - The approved aesthetic is **Adaptive Native**: a crisp, familiar macOS light
   appearance and a calm Storage Observatory dark appearance. The live storage
