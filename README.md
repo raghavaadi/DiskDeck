@@ -176,9 +176,13 @@ accounting, app-leftover detection, menu-bar free-space readout.
 Fonts: Saira Condensed (SIL OFL, see `assets/fonts/OFL.txt`); numerals use
 egui's built-in Hack.
 
-Brand sources: `assets/logo.svg` is the transparent standalone mark;
-`assets/icon.svg` is the macOS app-icon composition. `assets/icon.png` and
-`assets/DiskDeck.icns` are rendered outputs.
+Brand source: `assets/logo.svg` is the approved transparent standalone mark.
+`assets/AppIcon.icon` supplies Default, Dark, and Mono/Tinted macOS 26
+appearances. `scripts/render-icon.cjs` synchronizes its SVG layers and derives
+the universal blue fallback at `assets/icon.svg` and `assets/icon.png`;
+`assets/DiskDeck.icns` is produced by `make-app.sh` for macOS 12–15 and builds
+without Xcode 26. When Xcode 26 is available, `make-app.sh` also compiles the
+adaptive icon into the app's `Assets.car`.
 
 ## License
 

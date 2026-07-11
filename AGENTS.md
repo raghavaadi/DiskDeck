@@ -42,11 +42,14 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
   stable cert and why `dist/DiskDeck.zip` bundles
   `scripts/install.command` — a recipient-facing installer that copies to
   /Applications, clears quarantine, opens the FDA pane, and launches.
-- `assets/logo.svg` is the canonical transparent brand mark and
-  `assets/icon.svg` is the canonical app-icon composition. Render the latter
-  with `scripts/render-icon.cjs`; `assets/icon.png` and `assets/DiskDeck.icns`
-  are generated outputs. `make-app.sh` regenerates the `.icns` only when the
-  PNG is newer.
+- `assets/logo.svg` is the single canonical transparent brand mark.
+  `scripts/render-icon.cjs` synchronizes the three SVG layers in
+  `assets/AppIcon.icon`, derives the universal blue fallback at
+  `assets/icon.svg`, and renders `assets/icon.png`. `make-app.sh` regenerates
+  `assets/DiskDeck.icns` when the PNG is newer, and when Xcode 26 `actool` is
+  available it also compiles Default, Dark, and Mono/Tinted renditions into
+  `Assets.car`. Never remove the `.icns` fallback or change the macOS 12.0
+  deployment target while adding adaptive icon behavior.
 - cargo lives at `~/.cargo/bin` — not on the default PATH of this machine's
   non-interactive shells.
 

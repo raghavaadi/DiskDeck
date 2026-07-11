@@ -34,6 +34,35 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/diskdeck "$APP/Contents/MacOS/diskdeck"
 cp assets/DiskDeck.icns "$APP/Contents/Resources/DiskDeck.icns"
+
+# macOS 26 adaptive icon: compile the Icon Composer document into Assets.car
+# when Xcode 26 tooling is available. The classic DiskDeck.icns remains the
+# macOS 12–15 and no-Xcode fallback selected by CFBundleIconFile below.
+ADAPTIVE_ICON=0
+ACTOOL="${ACTOOL:-$(xcrun --find actool 2>/dev/null || true)}"
+if [ -n "$ACTOOL" ] && [ -x "$ACTOOL" ] && [ -d assets/AppIcon.icon ]; then
+  if "$ACTOOL" assets/AppIcon.icon \
+      --compile "$APP/Contents/Resources" \
+      --platform macosx \
+      --minimum-deployment-target 12.0 \
+      --target-device mac \
+      --app-icon AppIcon \
+      --output-partial-info-plist "$BUILD/adaptive-icon.plist" \
+      --output-format human-readable-text \
+      --warnings --notices; then
+    [ -f "$APP/Contents/Resources/Assets.car" ] || {
+      echo "✗ actool did not produce Assets.car" >&2
+      exit 1
+    }
+    ADAPTIVE_ICON=1
+    echo "✓ adaptive icon → Assets.car (Default / Dark / Mono)"
+  else
+    echo "⚠ adaptive icon compile failed; using DiskDeck.icns fallback" >&2
+  fi
+else
+  echo "▸ Icon Composer tooling unavailable; using DiskDeck.icns fallback"
+fi
+
 cat > "$APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -53,6 +82,10 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 </dict>
 </plist>
 EOF
+
+if [ "$ADAPTIVE_ICON" = "1" ]; then
+  /usr/libexec/PlistBuddy -c 'Add :CFBundleIconName string AppIcon' "$APP/Contents/Info.plist"
+fi
 
 codesign --force --deep --sign "$IDENTITY" "$APP"
 codesign --verify --strict "$APP" && echo "✓ signed as: $IDENTITY"
