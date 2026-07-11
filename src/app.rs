@@ -4,6 +4,7 @@
 use crate::clean::{
     fmt_bytes, fmt_count, open_full_disk_access, reveal_in_finder, run_clean, CleanEvent, CleanJob,
 };
+use crate::history::{default_history_dir, record_scan, GrowthSummary, HistoryEvent};
 use crate::offload::{
     can_confirm_offload, check_movable, classify_movable, external_volumes, has_room, run_offload,
     OffloadEvent, OffloadJob, Volume,
@@ -89,6 +90,9 @@ pub struct App {
     dialog_hold: f32,
     review_open: bool,
     activity_open: bool,
+    history_rx: Option<Receiver<HistoryEvent>>,
+    regrowth: Option<GrowthSummary>,
+    history_baseline: bool,
 }
 
 fn now_hms() -> String {
@@ -112,6 +116,20 @@ fn tail_str(s: &str, max: usize) -> String {
 fn fmt_elapsed(d: Duration) -> String {
     let s = d.as_secs();
     format!("{}:{:02}", s / 60, s % 60)
+}
+
+fn should_record_history(state: ScanState) -> bool {
+    state == ScanState::Done
+}
+
+fn fmt_delta(bytes: i64) -> String {
+    if bytes > 0 {
+        format!("+{}", fmt_bytes(bytes))
+    } else if bytes < 0 {
+        format!("−{}", fmt_bytes(bytes.saturating_abs()))
+    } else {
+        "no change".to_string()
+    }
 }
 
 impl App {
@@ -141,6 +159,9 @@ impl App {
             dialog_hold: 0.0,
             review_open: false,
             activity_open: false,
+            history_rx: None,
+            regrowth: None,
+            history_baseline: false,
         }
     }
 
@@ -162,6 +183,9 @@ impl App {
         self.zoom = None;
         self.recs.clear();
         self.recs_built = false;
+        self.history_rx = None;
+        self.regrowth = None;
+        self.history_baseline = false;
         self.ops(
             OpsKind::Info,
             "scan initiated — sweeping /System/Volumes/Data (read-only)",
@@ -182,12 +206,13 @@ impl App {
 
     fn on_scan_finished(&mut self) {
         let Some(scan) = &self.scan else { return };
+        let state = scan.state();
         let (files, bytes, denied, ms, done) = (
             scan.root.files(),
             scan.root.bytes(),
             scan.denied.load(Relaxed),
             scan.duration_ms.load(Relaxed),
-            scan.state() == ScanState::Done,
+            state == ScanState::Done,
         );
         let root = scan.root.clone();
         self.ops(
@@ -228,6 +253,66 @@ impl App {
             })
             .collect();
         self.recs_built = true;
+        if should_record_history(state) {
+            if let Some(dir) = default_history_dir() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                match record_scan(root, dir, tx) {
+                    Ok(()) => self.history_rx = Some(rx),
+                    Err(error) => self.ops(
+                        OpsKind::Amber,
+                        format!("scan history unavailable — {error}"),
+                    ),
+                }
+            }
+        }
+    }
+
+    fn poll_history(&mut self) {
+        let event = match self.history_rx.as_ref().map(Receiver::try_recv) {
+            Some(Ok(event)) => Some(event),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => Some(HistoryEvent::Failed(
+                "history worker stopped before reporting".into(),
+            )),
+        };
+        self.history_rx = None;
+        match event.unwrap() {
+            HistoryEvent::BaselineSaved => {
+                self.history_baseline = true;
+                self.regrowth = None;
+                self.ops(
+                    OpsKind::Dim,
+                    "scan baseline saved — future scans will show what grew",
+                );
+            }
+            HistoryEvent::Compared(summary) => {
+                self.history_baseline = false;
+                let largest = summary.growers.first().map(|growth| {
+                    format!(
+                        "; largest growth: {} {}",
+                        growth.path.display(),
+                        fmt_delta(growth.bytes_delta)
+                    )
+                });
+                self.ops(
+                    OpsKind::Info,
+                    format!(
+                        "since last scan: {}{}",
+                        fmt_delta(summary.total_delta),
+                        largest.unwrap_or_default()
+                    ),
+                );
+                self.regrowth = Some(summary);
+            }
+            HistoryEvent::Failed(error) => {
+                self.history_baseline = false;
+                self.regrowth = None;
+                self.ops(
+                    OpsKind::Amber,
+                    format!("scan history unavailable — {error}"),
+                );
+            }
+        }
     }
 
     fn poll_clean_events(&mut self) {
@@ -543,6 +628,14 @@ mod tests {
     }
 
     #[test]
+    fn history_records_completed_scans_only() {
+        assert!(should_record_history(ScanState::Done));
+        assert!(!should_record_history(ScanState::Idle));
+        assert!(!should_record_history(ScanState::Running));
+        assert!(!should_record_history(ScanState::Aborted));
+    }
+
+    #[test]
     fn map_actions_match_real_synthetic_and_denied_items() {
         assert_eq!(
             map_item_actions(true, false, false, true, false),
@@ -809,6 +902,7 @@ impl eframe::App for App {
         }
         self.poll_clean_events();
         self.poll_offload();
+        self.poll_history();
         if self.stats_at.elapsed() > Duration::from_secs(5) {
             self.stats = disk_stats();
             self.stats_at = Instant::now();
@@ -819,6 +913,7 @@ impl eframe::App for App {
             || self.stamp.is_some()
             || self.offloading
             || self.dialog.is_some()
+            || self.history_rx.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(40));
         }
@@ -1005,6 +1100,40 @@ impl App {
             theme::body(11.0),
             palette.muted,
         );
+        let history = if self.history_baseline {
+            Some((
+                "Baseline saved · compare after the next scan".to_string(),
+                palette.muted,
+            ))
+        } else {
+            self.regrowth.as_ref().map(|summary| {
+                let mut text = format!("Since last scan: {}", fmt_delta(summary.total_delta));
+                if let Some(growth) = summary.growers.first() {
+                    text.push_str(&format!(
+                        "  ·  {} {}",
+                        growth.path.display(),
+                        fmt_delta(growth.bytes_delta)
+                    ));
+                }
+                (
+                    text,
+                    if summary.total_delta > 0 {
+                        palette.caution
+                    } else {
+                        palette.safe
+                    },
+                )
+            })
+        };
+        if let Some((text, color)) = history {
+            p.text(
+                content.min + vec2(16.0, 68.0),
+                Align2::LEFT_TOP,
+                text,
+                theme::body(10.5),
+                color,
+            );
+        }
     }
 
     #[allow(dead_code)]
