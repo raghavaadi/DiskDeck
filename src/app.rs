@@ -416,103 +416,149 @@ impl App {
     }
 }
 
-/// Panel chrome: fill, edge, HUD corner brackets, header. Returns content rect.
+struct WorkspaceLayout {
+    overview: Rect,
+    map: Rect,
+}
+
+impl WorkspaceLayout {
+    fn from_rect(full: Rect) -> Self {
+        let overview = Rect::from_min_size(full.min, vec2(full.width(), 142.0));
+        let map = Rect::from_min_max(pos2(full.min.x, overview.max.y + 12.0), full.max);
+        Self { overview, map }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_layout_preserves_map_space_at_minimum_window() {
+        let full = Rect::from_min_size(Pos2::ZERO, vec2(766.0, 564.0));
+        let layout = WorkspaceLayout::from_rect(full);
+        assert_eq!(layout.overview.height(), 142.0);
+        assert!(layout.map.height() >= 410.0);
+        assert_eq!(layout.overview.min, full.min);
+        assert_eq!(layout.map.max, full.max);
+    }
+
+    #[test]
+    fn workspace_layout_keeps_twelve_point_gap() {
+        let full = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 700.0));
+        let layout = WorkspaceLayout::from_rect(full);
+        assert_eq!(layout.map.min.y - layout.overview.max.y, 12.0);
+    }
+}
+
+/// Quiet native panel surface with a compact title row. Returns its content rect.
 fn panel_chrome(ui: &egui::Ui, rect: Rect, title: &str, sub: Option<(String, Color32)>) -> Rect {
+    let palette = theme::palette(ui.ctx());
     let p = ui.painter();
-    p.rect_filled(rect, Rounding::same(6.0), theme::PANEL);
-    p.rect_stroke(rect, Rounding::same(6.0), Stroke::new(1.0, theme::edge()));
-    let b = 13.0;
-    let s = Stroke::new(1.5, theme::amber_dim(95));
-    p.line_segment(
-        [
-            rect.left_top() + vec2(0.5, b),
-            rect.left_top() + vec2(0.5, 0.5),
-        ],
-        s,
-    );
-    p.line_segment(
-        [
-            rect.left_top() + vec2(0.5, 0.5),
-            rect.left_top() + vec2(b, 0.5),
-        ],
-        s,
-    );
-    p.line_segment(
-        [
-            rect.right_bottom() - vec2(0.5, b),
-            rect.right_bottom() - vec2(0.5, 0.5),
-        ],
-        s,
-    );
-    p.line_segment(
-        [
-            rect.right_bottom() - vec2(0.5, 0.5),
-            rect.right_bottom() - vec2(b, 0.5),
-        ],
-        s,
-    );
+    p.rect_filled(rect, Rounding::same(12.0), palette.surface);
+    p.rect_stroke(rect, Rounding::same(12.0), Stroke::new(1.0, palette.edge));
     p.text(
-        rect.min + vec2(14.0, 7.0),
+        rect.min + vec2(14.0, 9.0),
         Align2::LEFT_TOP,
-        spaced(title),
-        theme::display(13.0),
-        theme::DIM,
+        title,
+        theme::display_md(13.0),
+        palette.muted,
     );
     if let Some((sub, color)) = sub {
         p.text(
-            pos2(rect.max.x - 14.0, rect.min.y + 9.0),
+            pos2(rect.max.x - 14.0, rect.min.y + 10.0),
             Align2::RIGHT_TOP,
             sub,
             theme::mono(10.0),
             color,
         );
     }
-    p.line_segment(
-        [
-            pos2(rect.min.x + 1.0, rect.min.y + 30.0),
-            pos2(rect.max.x - 1.0, rect.min.y + 30.0),
-        ],
-        Stroke::new(1.0, theme::edge_soft()),
-    );
-    Rect::from_min_max(rect.min + vec2(0.0, 31.0), rect.max)
+    Rect::from_min_max(rect.min + vec2(0.0, 34.0), rect.max)
 }
 
-fn arc_points(c: Pos2, r: f32, t0: f32, t1: f32, n: usize) -> Vec<Pos2> {
+fn circle_arc_points(c: Pos2, r: f32, fraction: f32, n: usize) -> Vec<Pos2> {
     (0..=n)
         .map(|i| {
-            let t = t0 + (t1 - t0) * i as f32 / n as f32;
-            let a = (150.0 + t * 240.0).to_radians();
+            let t = fraction * i as f32 / n as f32;
+            let a = -std::f32::consts::FRAC_PI_2 + t * std::f32::consts::TAU;
             c + vec2(a.cos(), a.sin()) * r
         })
         .collect()
 }
 
+fn ellipse_points(c: Pos2, rx: f32, ry: f32, n: usize) -> Vec<Pos2> {
+    (0..=n)
+        .map(|i| {
+            let a = std::f32::consts::TAU * i as f32 / n as f32;
+            c + vec2(a.cos() * rx, a.sin() * ry)
+        })
+        .collect()
+}
+
+fn draw_brand_mark(ui: &egui::Ui, rect: Rect) {
+    let palette = theme::palette(ui.ctx());
+    let painter = ui.painter();
+    let center = rect.center() + vec2(0.0, -4.0);
+    for (index, y) in [0.0, 5.5, 11.0].iter().enumerate() {
+        let color = if index == 0 {
+            palette.accent
+        } else {
+            palette.muted
+        };
+        painter.add(egui::Shape::line(
+            ellipse_points(center + vec2(0.0, *y), 9.0, 3.5, 24),
+            Stroke::new(1.4, color),
+        ));
+    }
+    painter.line_segment(
+        [center + vec2(-9.0, 0.0), center + vec2(-9.0, 11.0)],
+        Stroke::new(1.4, palette.muted),
+    );
+    painter.line_segment(
+        [center + vec2(9.0, 0.0), center + vec2(9.0, 11.0)],
+        Stroke::new(1.4, palette.muted),
+    );
+    painter.circle_filled(center, 1.8, palette.accent);
+}
+
 fn ghost_button(ui: &mut egui::Ui, text: &str, hot: bool) -> egui::Response {
-    let label = spaced(text);
-    let font = theme::display(13.0);
-    let galley_w = label.len() as f32 * 7.0 + 18.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley_w.max(90.0), 30.0), Sense::click());
+    let palette = theme::palette(ui.ctx());
+    let font = theme::body(12.0);
+    let galley_w = text.chars().count() as f32 * 6.6 + 24.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley_w.max(88.0), 32.0), Sense::click());
     let (border, fg, fill) = if hot {
         (
-            theme::amber_dim(120),
-            theme::AMBER,
-            theme::amber_dim(if resp.hovered() { 36 } else { 18 }),
+            palette.accent,
+            if ui.visuals().dark_mode {
+                palette.canvas
+            } else {
+                Color32::WHITE
+            },
+            if resp.hovered() {
+                palette.accent_dim(230)
+            } else {
+                palette.accent
+            },
         )
     } else {
         (
-            theme::edge(),
+            palette.edge,
             if resp.hovered() {
-                theme::INK
+                palette.ink
             } else {
-                theme::DIM
+                palette.muted
             },
-            Color32::TRANSPARENT,
+            if resp.hovered() {
+                palette.surface_raised
+            } else {
+                Color32::TRANSPARENT
+            },
         )
     };
     let p = ui.painter();
-    p.rect_filled(rect, Rounding::same(4.0), fill);
-    p.rect_stroke(rect, Rounding::same(4.0), Stroke::new(1.0, border));
-    p.text(rect.center(), Align2::CENTER_CENTER, label, font, fg);
+    p.rect_filled(rect, Rounding::same(8.0), fill);
+    p.rect_stroke(rect, Rounding::same(8.0), Stroke::new(1.0, border));
+    p.text(rect.center(), Align2::CENTER_CENTER, text, font, fg);
     resp
 }
 
@@ -552,40 +598,36 @@ impl eframe::App for App {
 
 impl App {
     fn top_bar(&mut self, ctx: &Context) {
+        let palette = theme::palette(ctx);
         egui::TopBottomPanel::top("topbar")
-            .exact_height(52.0)
-            .frame(Frame::none().fill(Color32::from_rgb(11, 15, 21)).inner_margin(Margin::symmetric(16.0, 0.0)))
+            .exact_height(56.0)
+            .frame(
+                Frame::none()
+                    .fill(palette.toolbar)
+                    .stroke(Stroke::new(1.0, palette.edge_soft))
+                    .inner_margin(Margin::symmetric(16.0, 0.0)),
+            )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    // brand mark: tiny gauge glyph
-                    let (mark, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
-                    let c = mark.center() + vec2(0.0, 2.0);
-                    ui.painter().add(egui::Shape::line(
-                        arc_points(c, 8.5, 0.0, 1.0, 24),
-                        Stroke::new(1.8, theme::AMBER),
-                    ));
-                    ui.painter().line_segment(
-                        [c, c + vec2(5.2, -5.8)],
-                        Stroke::new(1.6, theme::AMBER),
-                    );
-                    ui.painter().circle_filled(c, 1.7, theme::AMBER);
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(spaced("DISKDECK")).font(theme::display(19.0)).color(theme::INK));
-                    ui.add_space(14.0);
+                    let (mark, _) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::hover());
+                    draw_brand_mark(ui, mark);
+                    ui.add_space(5.0);
                     ui.label(
-                        RichText::new("VOLUME // MACINTOSH HD — DATA  ·  NATIVE RUST")
-                            .font(theme::mono(9.5))
-                            .color(theme::FAINT),
+                        RichText::new("DiskDeck")
+                            .font(theme::display(20.0))
+                            .color(palette.ink),
                     );
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("Macintosh HD").font(theme::body(11.5)).color(palette.faint));
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let scanning = self.scanning();
                         let label = if scanning {
-                            "ABORT SCAN"
+                            "Stop scan"
                         } else if self.scan.is_some() {
-                            "RESCAN"
+                            "Rescan"
                         } else {
-                            "INITIATE SCAN"
+                            "Scan now"
                         };
                         if ghost_button(ui, label, true).clicked() {
                             if scanning {
@@ -598,7 +640,7 @@ impl App {
                             }
                         }
                         ui.add_space(8.0);
-                        let fda = ghost_button(ui, "FULL DISK ACCESS", false);
+                        let fda = ghost_button(ui, "Full Disk Access", false);
                         if fda.clicked() {
                             open_full_disk_access();
                             self.ops(OpsKind::Info,
@@ -613,131 +655,101 @@ impl App {
     }
 
     fn central(&mut self, ctx: &Context) {
+        let palette = theme::palette(ctx);
         egui::CentralPanel::default()
             .frame(
                 Frame::none()
-                    .fill(theme::BG)
+                    .fill(palette.canvas)
                     .inner_margin(Margin::same(12.0)),
             )
             .show(ctx, |ui| {
                 let full = ui.available_rect_before_wrap();
-                let hero_h = 168.0;
-                let hero = Rect::from_min_size(full.min, vec2(full.width(), hero_h));
-                let map = Rect::from_min_max(pos2(full.min.x, hero.max.y + 12.0), full.max);
+                let layout = WorkspaceLayout::from_rect(full);
 
-                // ── hero: gauge + telemetry ──
-                let gauge_rect = Rect::from_min_size(hero.min, vec2(330.0, hero_h));
-                let tele_rect =
-                    Rect::from_min_max(pos2(gauge_rect.max.x + 12.0, hero.min.y), hero.max);
-                self.draw_gauge(ui, gauge_rect);
+                let capacity_rect =
+                    Rect::from_min_size(layout.overview.min, vec2(330.0, layout.overview.height()));
+                let tele_rect = Rect::from_min_max(
+                    pos2(capacity_rect.max.x + 12.0, layout.overview.min.y),
+                    layout.overview.max,
+                );
+                self.draw_capacity(ui, capacity_rect);
                 self.draw_telemetry(ui, tele_rect);
-
-                // ── terrain map ──
-                self.draw_map(ui, map);
+                self.draw_map(ui, layout.map);
             });
     }
 
-    fn draw_gauge(&self, ui: &egui::Ui, rect: Rect) {
-        let sub = format!("{} VOLUME", fmt_bytes(self.stats.total));
-        let content = panel_chrome(ui, rect, "CAPACITY", Some((sub, theme::FAINT)));
+    fn draw_capacity(&self, ui: &egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let content = panel_chrome(
+            ui,
+            rect,
+            "Storage used",
+            Some((format!("{:.0}%", self.stats.used_pct), palette.faint)),
+        );
         let p = ui.painter();
-        let r = (content.height() * 0.62).min(content.width() * 0.30);
-        let c = pos2(content.center().x, content.min.y + content.height() * 0.60);
-
-        // track
-        p.add(egui::Shape::line(
-            arc_points(c, r, 0.0, 1.0, 64),
-            Stroke::new(9.0, Color32::from_rgba_unmultiplied(140, 175, 215, 26)),
-        ));
-        // danger zone
-        p.add(egui::Shape::line(
-            arc_points(c, r + 8.0, 0.86, 1.0, 16),
-            Stroke::new(2.4, theme::red_dim(90)),
-        ));
-        // ticks
-        for i in 0..=20 {
-            let t = i as f32 / 20.0;
-            let major = i % 5 == 0;
-            let a = (150.0 + t * 240.0).to_radians();
-            let dir = vec2(a.cos(), a.sin());
-            let (r0, r1) = if major {
-                (r + 11.0, r + 16.0)
-            } else {
-                (r + 8.0, r + 13.0)
-            };
-            p.line_segment(
-                [c + dir * r0, c + dir * r1],
-                Stroke::new(
-                    1.3,
-                    Color32::from_rgba_unmultiplied(140, 175, 215, if major { 120 } else { 70 }),
-                ),
-            );
-        }
-        // fill with glow
+        let c = pos2(content.max.x - 54.0, content.center().y + 1.0);
+        let r = 32.0;
+        p.circle_stroke(c, r, Stroke::new(7.0, palette.edge_soft));
         let frac = (self.stats.used_pct / 100.0).clamp(0.0, 1.0) as f32;
         if frac > 0.005 {
             let color = if self.stats.used_pct >= 85.0 {
-                theme::RED
+                palette.danger
             } else if self.stats.used_pct >= 70.0 {
-                Color32::from_rgb(255, 207, 112)
+                palette.caution
             } else {
-                theme::AMBER
+                palette.accent
             };
-            let glow = |a: u8| Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a);
-            for (w, a) in [(16.0, 28u8), (11.0, 80), (6.5, 255)] {
-                p.add(egui::Shape::line(
-                    arc_points(c, r, 0.0, frac, 64),
-                    Stroke::new(w, glow(a)),
-                ));
-            }
+            p.add(egui::Shape::line(
+                circle_arc_points(c, r, frac, 64),
+                Stroke::new(7.0, color),
+            ));
         }
-        // readout
         p.text(
-            c + vec2(0.0, -4.0),
+            c,
             Align2::CENTER_CENTER,
-            fmt_bytes(self.stats.free),
-            theme::mono(26.0),
-            theme::INK,
+            format!("{:.0}%", self.stats.used_pct),
+            theme::mono(11.0),
+            palette.ink,
         );
         p.text(
-            c + vec2(0.0, 14.0),
-            Align2::CENTER_CENTER,
-            spaced("FREE SPACE"),
-            theme::display(9.5),
-            theme::DIM,
+            content.min + vec2(16.0, 12.0),
+            Align2::LEFT_TOP,
+            fmt_bytes(self.stats.used),
+            theme::mono(28.0),
+            palette.ink,
         );
         p.text(
-            c + vec2(0.0, 30.0),
-            Align2::CENTER_CENTER,
+            content.min + vec2(16.0, 46.0),
+            Align2::LEFT_TOP,
             format!(
-                "USED {} OF {} · {:.0}%",
-                fmt_bytes(self.stats.used),
+                "of {}  ·  {} free",
                 fmt_bytes(self.stats.total),
-                self.stats.used_pct
+                fmt_bytes(self.stats.free),
             ),
-            theme::mono(9.5),
-            theme::FAINT,
+            theme::body(11.0),
+            palette.muted,
         );
     }
 
     fn draw_telemetry(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
         let scanning = self.scanning();
         let (state_txt, state_color) = if scanning {
-            ("SWEEPING VOLUME".to_string(), theme::CYAN)
+            ("Scanning".to_string(), palette.accent)
         } else if let Some(s) = &self.scan {
             (
                 if s.state() == ScanState::Done {
-                    "MAP COMPLETE"
+                    "Scan complete"
                 } else {
-                    "SCAN ABORTED"
+                    "Scan stopped"
                 }
                 .to_string(),
-                theme::FAINT,
+                palette.faint,
             )
         } else {
-            ("STANDING BY".to_string(), theme::FAINT)
+            ("Ready".to_string(), palette.faint)
         };
-        let content = panel_chrome(ui, rect, "SCAN TELEMETRY", Some((state_txt, state_color)));
+        let content = panel_chrome(ui, rect, "Scan details", Some((state_txt, state_color)));
         let p = ui.painter();
 
         let (files, bytes, denied) = self
@@ -756,18 +768,18 @@ impl App {
         });
 
         let counters = [
-            ("ITEMS MAPPED", files.max(0).to_string(), theme::CYAN),
-            ("FOOTPRINT", fmt_bytes(bytes), theme::CYAN),
+            ("Items mapped", files.max(0).to_string(), palette.ink),
+            ("Footprint", fmt_bytes(bytes), palette.ink),
             (
-                "NO ACCESS",
+                "No access",
                 denied.to_string(),
                 if denied > 0 {
-                    theme::red_dim(220)
+                    palette.danger
                 } else {
-                    theme::DIM
+                    palette.ink
                 },
             ),
-            ("ELAPSED", elapsed, theme::CYAN),
+            ("Elapsed", elapsed, palette.ink),
         ];
         let col_w = content.width() / counters.len() as f32;
         for (i, (label, value, color)) in counters.iter().enumerate() {
@@ -775,15 +787,15 @@ impl App {
             p.text(
                 pos2(x, content.min.y + 12.0),
                 Align2::LEFT_TOP,
-                spaced(label),
-                theme::display(9.0),
-                theme::FAINT,
+                label,
+                theme::body(9.5),
+                palette.faint,
             );
             p.text(
                 pos2(x, content.min.y + 28.0),
                 Align2::LEFT_TOP,
                 value,
-                theme::mono(20.0),
+                theme::mono(17.0),
                 *color,
             );
             if i > 0 {
@@ -793,7 +805,7 @@ impl App {
                         pos2(lx, content.min.y + 12.0),
                         pos2(lx, content.min.y + 54.0),
                     ],
-                    Stroke::new(1.0, theme::edge_soft()),
+                    Stroke::new(1.0, palette.edge_soft),
                 );
             }
         }
@@ -811,14 +823,14 @@ impl App {
 
         // ticker
         let ticker = Rect::from_min_max(
-            pos2(content.min.x + 14.0, content.max.y - 52.0),
-            pos2(content.max.x - 14.0, content.max.y - 30.0),
+            pos2(content.min.x + 14.0, content.max.y - 31.0),
+            pos2(content.max.x - 14.0, content.max.y - 10.0),
         );
-        p.rect_filled(ticker, Rounding::same(3.0), Color32::from_rgb(4, 6, 9));
+        p.rect_filled(ticker, Rounding::same(6.0), palette.surface_raised);
         p.rect_stroke(
             ticker,
-            Rounding::same(3.0),
-            Stroke::new(1.0, theme::edge_soft()),
+            Rounding::same(6.0),
+            Stroke::new(1.0, palette.edge_soft),
         );
         let cur = self
             .scan
@@ -838,22 +850,17 @@ impl App {
             format!("▸ {ticker_txt}"),
             theme::mono(10.0),
             if scanning {
-                theme::cyan_dim(200)
+                palette.accent
             } else {
-                theme::DIM
+                palette.muted
             },
         );
 
-        // progress bar
         let bar = Rect::from_min_max(
-            pos2(content.min.x + 14.0, content.max.y - 18.0),
-            pos2(content.max.x - 14.0, content.max.y - 14.0),
+            pos2(ticker.min.x, ticker.max.y - 3.0),
+            pos2(ticker.max.x, ticker.max.y),
         );
-        p.rect_filled(
-            bar,
-            Rounding::same(2.0),
-            Color32::from_rgba_unmultiplied(140, 175, 215, 20),
-        );
+        p.rect_filled(bar, Rounding::same(2.0), palette.edge_soft);
         if scanning {
             let t = ui.input(|i| i.time) as f32;
             let seg = 26.0;
@@ -864,12 +871,12 @@ impl App {
                 bp.rect_filled(
                     Rect::from_min_size(pos2(x, bar.min.y), vec2(seg * 0.55, bar.height())),
                     Rounding::ZERO,
-                    theme::cyan_dim(150),
+                    palette.accent_dim(180),
                 );
                 x += seg;
             }
         } else if self.scan_done() {
-            p.rect_filled(bar, Rounding::same(2.0), theme::amber_dim(140));
+            p.rect_filled(bar, Rounding::same(2.0), palette.safe_dim(180));
         }
     }
 
