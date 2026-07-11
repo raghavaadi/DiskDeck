@@ -28,6 +28,8 @@ compiler proves there are no data races.
   in Finder, and Move to SSD instead of memorizing modifier-key shortcuts.
 - **Verified SSD offload** — move a home-folder item to an external drive,
   verify the copy, then optionally leave a symlink at the original path.
+  Library data, hidden roots, cloud-sync folders, app/media bundles, and
+  symlinked paths are refused in both the UI and background worker.
 - One self-contained native binary; no webview runtime, no bindings layer.
 
 Safety is structural, not advisory:
@@ -37,6 +39,8 @@ Safety is structural, not advisory:
 - nothing is removed without a ticked checkbox **and** the 900 ms hold
 - trash = instant same-volume rename into `~/.Trash` (no Automation prompt);
   Finder fallback only
+- SSD moves refuse an existing destination and recheck the original's
+  filesystem identity immediately before removal
 
 ## Installation
 
@@ -156,7 +160,7 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 | `scan.rs` | counts & aggregation, post-scan compaction folds small dirs, hardlinks counted once, denied dirs counted but non-fatal, nested `node_modules` not double-reported |
 | `rules.rs` | KB doctrine on a synthetic tree: tiers, Trash=empty-not-trash, ≥50 MB cache floor + skip-list, Library `node_modules` excluded, safe-before-caution ordering, every rec carries explainers, `~` path prettification |
 | `clean.rs` | quick_du, write-protected delete, empty-keeps-dir, output tailing, command timeout |
-| `offload.rs` | path safety, capacity margin, confirmation gates, verified moves, symlink behavior, event ordering |
+| `offload.rs` | protected-path policy, worker revalidation, destination collision, source identity, capacity margin, verified moves, symlink behavior, event ordering |
 | `treemap.rs` | squarified layout conserves area, stays in bounds, degenerate inputs |
 
 ### Release checklist
@@ -184,9 +188,10 @@ cannot be published accidentally.
 
 ## Project history
 
-Born 2026-06-12 after a manual cleanup session recovered ~70 GB. Parked v2
-ideas: regrowth tracking between scans, Docker deep-dive panel, APFS snapshot/purgeable
-accounting, app-leftover detection, menu-bar free-space readout.
+Born 2026-06-12 after a manual cleanup session recovered ~70 GB. The v2
+roadmap proceeds through regrowth history, moved-item restore, an optional
+Developer Lens, APFS accounting, app-leftover detection, and a menu-bar
+free-space monitor—one independently verified slice at a time.
 
 Fonts: Inter (SIL OFL, see `assets/fonts/LICENSE.txt`) for the native-width UI;
 paths and scan data use egui's built-in Hack.

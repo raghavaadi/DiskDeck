@@ -26,6 +26,12 @@ changing anything; most lines exist because something broke.
    `Caution` = costs a re-download/re-install (NEVER pre-checked — selection
    default keys off tier in `App::on_scan_finished`). User documents/code/
    media are never recommended.
+7. **SSD offload policy is structural.** `offload::classify_movable` owns the
+   protected-path rules; `check_movable` adds real metadata/symlink checks,
+   and `run_offload` repeats them at the worker boundary. `perform_move`
+   refuses an existing destination and rechecks source device/inode before
+   deletion. Never bypass these layers from UI code or add an override for
+   Library, hidden, cloud-sync, app-bundle, or managed-library paths.
 
 ## Build & ship
 
@@ -60,6 +66,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 | `scan.rs` | rayon parallel walker; `Arc<Node>` tree; **atomic size bubbling up the ancestor chain so the UI renders the tree WHILE it grows** (the headline feature) | post-scan `compact()` folds dirs <10 MB into parent aggregates; files <100 MB are never materialized as nodes |
 | `rules.rs` | safety KB → `Vec<Rec>`; port of the proven Go doctrine | overlap control: caches with dedicated rules are in the `skip` list so generic `~/Library/Caches` enumeration doesn't double-report; recs carry data-volume paths — fs ops go through `strip_data_root` |
 | `clean.rs` | trash/delete/empty/command executors + background orchestrator (mpsc events) | **trash = `os::rename` into `~/.Trash` FIRST** — Finder-osascript hangs silently without the Automation TCC grant and is fallback only; `delete_path` chmods-and-retries for write-protected trees (go-modcache style) |
+| `offload.rs` | protected-path policy, external-volume checks, verified copy/move, ledger, worker events | UI eligibility is advisory; the worker must repeat full policy/target/capacity checks, and only a matching source identity may reach `delete_path` |
 | `treemap.rs` | squarified layout + paint + zoom-from animation | caps at 40 rects + synthetic "smaller items" aggregate |
 | `app.rs` | egui panels, gauge, telemetry, rec cards, hold-button, ops feed | `request_repaint_after(40ms)` only while scanning/cleaning/animating — don't repaint unconditionally |
 | `theme.rs` | colors, fonts, `spaced()` | see the tofu gotcha below |
@@ -134,14 +141,14 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 
 ## Repo conventions
 
-- Flat module layout (`scan/rules/clean/treemap/theme/app`), one concern per
+- Flat module layout (`scan/rules/clean/offload/treemap/theme/app`), one concern per
   file. No new crate dependencies without strong reason.
 - The approved aesthetic is **Adaptive Native**: a crisp, familiar macOS light
   appearance and a calm Storage Observatory dark appearance. The live storage
   map is the signature surface; surrounding chrome stays quiet. Color is
   semantic: mint=safe, amber=review, red=danger, cyan=navigation/scanning.
-- Parked v2 ideas: regrowth tracking between scans (owner's #1 want), Docker
-  deep-dive panel, APFS snapshot/purgeable accounting, app-leftover
-  detection, menu-bar free-space readout.
+- The committed v2 roadmap is safety foundation → regrowth history → moved-item
+  restore → optional Developer Lens → APFS accounting → app leftovers →
+  menu-bar monitor. Deliver and verify one independent slice at a time.
 - Commit style: imperative subject, body explains the why. `cargo test`
   before every commit.
