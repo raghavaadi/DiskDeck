@@ -2,6 +2,7 @@
 
 mod app;
 mod clean;
+mod history;
 mod offload;
 mod rules;
 mod scan;
