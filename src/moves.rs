@@ -4,6 +4,13 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
+
+use crate::clean::delete_path;
+use crate::transfer::{
+    apparent_size, ensure_same_identity, path_identity, verified_ditto_copy, PathIdentity,
+    MARGIN_BYTES,
+};
 
 const MAGIC: &[u8; 8] = b"DDMOVE1\0";
 const MAX_DECODE_RECORDS: usize = 4096;
@@ -457,12 +464,365 @@ pub fn refresh_records(
         .collect())
 }
 
+#[derive(Clone, Debug)]
+pub struct RestoreRoots {
+    pub home: PathBuf,
+    pub volumes: PathBuf,
+}
+
+impl RestoreRoots {
+    pub fn production(home: PathBuf) -> Self {
+        Self {
+            home,
+            volumes: PathBuf::from("/Volumes"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreBlock {
+    UnsafeRecord,
+    DriveDisconnected,
+    TargetMissing,
+    TargetSymlink,
+    OriginChanged,
+    SymlinkAncestor,
+    NotEnoughSpace,
+    StagingCollision,
+}
+
+impl RestoreBlock {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::UnsafeRecord => "This move record is not safe to restore.",
+            Self::DriveDisconnected => "Connect the recorded external drive to restore this item.",
+            Self::TargetMissing => "The recorded item is missing from the external drive.",
+            Self::TargetSymlink => {
+                "The external item became a symlink and cannot be restored safely."
+            }
+            Self::OriginChanged => {
+                "The original path is occupied or no longer matches DiskDeck's link."
+            }
+            Self::SymlinkAncestor => {
+                "A parent folder is a symlink, so restore cannot verify the real destination."
+            }
+            Self::NotEnoughSpace => "The Mac no longer has enough free space for this restore.",
+            Self::StagingCollision => "DiskDeck could not reserve a safe temporary restore path.",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RestorePlan {
+    staging: PathBuf,
+    backup: PathBuf,
+    target_identity: PathIdentity,
+    total: i64,
+}
+
+pub struct RestoreOutcome {
+    pub restored: i64,
+    pub origin: PathBuf,
+    pub warning: Option<String>,
+}
+
+pub struct RestoreJob {
+    pub record: MoveRecord,
+    pub registry_path: PathBuf,
+    pub roots: RestoreRoots,
+}
+
+pub enum RestoreEvent {
+    Started {
+        name: String,
+        total: i64,
+    },
+    Done {
+        restored: i64,
+        origin: PathBuf,
+        warning: Option<String>,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+pub fn can_confirm_restore(acknowledged: bool, block: Option<RestoreBlock>) -> bool {
+    acknowledged && block.is_none()
+}
+
+fn available_bytes(path: &Path) -> Option<i64> {
+    let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(cpath.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    Some(stat.f_bavail as i64 * stat.f_bsize as i64)
+}
+
+fn has_symlink_ancestor(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    let mut current = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            break;
+        }
+        let std::path::Component::Normal(name) = component else {
+            return true;
+        };
+        current.push(name);
+        if std::fs::symlink_metadata(&current)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(true)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn unique_sibling(path: &Path, role: &str) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    let name = path.file_name()?.to_string_lossy();
+    for index in 0..100u32 {
+        let candidate = parent.join(format!(
+            ".{name}.diskdeck-{role}-{}-{index}",
+            std::process::id()
+        ));
+        if std::fs::symlink_metadata(&candidate)
+            .map(|_| false)
+            .unwrap_or_else(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn preflight_restore(
+    record: &MoveRecord,
+    roots: &RestoreRoots,
+) -> Result<RestorePlan, RestoreBlock> {
+    let volume =
+        safe_record_paths(record, &roots.home, &roots.volumes).ok_or(RestoreBlock::UnsafeRecord)?;
+    if !volume.is_dir() {
+        return Err(RestoreBlock::DriveDisconnected);
+    }
+    let target =
+        std::fs::symlink_metadata(&record.dest).map_err(|_| RestoreBlock::TargetMissing)?;
+    if target.file_type().is_symlink() {
+        return Err(RestoreBlock::TargetSymlink);
+    }
+    if !target.is_file() && !target.is_dir() {
+        return Err(RestoreBlock::TargetMissing);
+    }
+    if has_symlink_ancestor(&roots.home, &record.origin)
+        || has_symlink_ancestor(&volume, &record.dest)
+    {
+        return Err(RestoreBlock::SymlinkAncestor);
+    }
+    match std::fs::symlink_metadata(&record.origin) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if std::fs::read_link(&record.origin).ok().as_deref() != Some(record.dest.as_path()) {
+                return Err(RestoreBlock::OriginChanged);
+            }
+        }
+        _ => return Err(RestoreBlock::OriginChanged),
+    }
+    let total = apparent_size(&record.dest);
+    if available_bytes(&roots.home).unwrap_or(0) < total.saturating_add(MARGIN_BYTES) {
+        return Err(RestoreBlock::NotEnoughSpace);
+    }
+    let staging =
+        unique_sibling(&record.origin, "restore").ok_or(RestoreBlock::StagingCollision)?;
+    let backup =
+        unique_sibling(&record.origin, "link-backup").ok_or(RestoreBlock::StagingCollision)?;
+    let target_identity = path_identity(&record.dest).map_err(|_| RestoreBlock::TargetMissing)?;
+    Ok(RestorePlan {
+        staging,
+        backup,
+        target_identity,
+        total,
+    })
+}
+
+pub fn restore_block(record: &MoveRecord, roots: &RestoreRoots) -> Option<RestoreBlock> {
+    preflight_restore(record, roots).err()
+}
+
+fn install_staged_origin(
+    origin: &Path,
+    staging: &Path,
+    backup: &Path,
+    expected_dest: &Path,
+) -> Result<(), String> {
+    match std::fs::symlink_metadata(origin) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::rename(staging, origin)
+                .map_err(|error| format!("install restored item: {error}"))
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if std::fs::read_link(origin).ok().as_deref() != Some(expected_dest) {
+                return Err("origin link changed during restore; external copy left intact".into());
+            }
+            if std::fs::symlink_metadata(backup).is_ok() {
+                return Err("restore link-backup path already exists".into());
+            }
+            std::fs::rename(origin, backup)
+                .map_err(|error| format!("park origin link: {error}"))?;
+            if let Err(error) = std::fs::rename(staging, origin) {
+                let rollback = std::fs::rename(backup, origin);
+                return Err(match rollback {
+                    Ok(()) => format!("install restored item: {error}; origin link restored"),
+                    Err(rollback) => format!(
+                        "install restored item: {error}; restore origin link manually from {} ({rollback})",
+                        backup.display()
+                    ),
+                });
+            }
+            let _ = std::fs::remove_file(backup);
+            Ok(())
+        }
+        _ => Err("origin changed during restore; external copy left intact".into()),
+    }
+}
+
+fn remove_verified_target(dest: &Path, expected: PathIdentity) -> Result<(), String> {
+    ensure_same_identity(dest, expected)?;
+    delete_path(dest)
+}
+
+fn join_warning(warning: &mut Option<String>, next: String) {
+    match warning {
+        Some(existing) => {
+            existing.push_str("; ");
+            existing.push_str(&next);
+        }
+        None => *warning = Some(next),
+    }
+}
+
+fn perform_restore(
+    record: &MoveRecord,
+    registry: &Path,
+    roots: &RestoreRoots,
+) -> Result<RestoreOutcome, String> {
+    let plan = preflight_restore(record, roots).map_err(|block| block.message().to_string())?;
+    if let Err(error) = verified_ditto_copy(&record.dest, &plan.staging) {
+        let _ = delete_path(&plan.staging);
+        return Err(error);
+    }
+    if let Err(error) = ensure_same_identity(&record.dest, plan.target_identity) {
+        let _ = delete_path(&plan.staging);
+        return Err(error);
+    }
+    install_staged_origin(&record.origin, &plan.staging, &plan.backup, &record.dest)?;
+    if apparent_size(&record.origin) < plan.total {
+        return Err("installed restore is smaller than the verified staging copy; external copy left intact".into());
+    }
+
+    let mut warning = None;
+    if let Err(error) = remove_verified_target(&record.dest, plan.target_identity) {
+        join_warning(
+            &mut warning,
+            format!("restored to the Mac, but external cleanup is incomplete: {error}"),
+        );
+    }
+    let restored_at = unsafe { libc::time(std::ptr::null_mut()) };
+    if let Err(error) = mark_restored(registry, record, restored_at) {
+        join_warning(
+            &mut warning,
+            format!("restored, but move history could not be updated: {error}"),
+        );
+    }
+    Ok(RestoreOutcome {
+        restored: plan.total,
+        origin: record.origin.clone(),
+        warning,
+    })
+}
+
+pub fn run_restore(job: RestoreJob, tx: Sender<RestoreEvent>) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("restore".into())
+        .spawn(move || {
+            let name = job
+                .record
+                .origin
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "moved item".into());
+            let total = apparent_size(&job.record.dest);
+            let _ = tx.send(RestoreEvent::Started { name, total });
+            match perform_restore(&job.record, &job.registry_path, &job.roots) {
+                Ok(outcome) => {
+                    let _ = tx.send(RestoreEvent::Done {
+                        restored: outcome.restored,
+                        origin: outcome.origin,
+                        warning: outcome.warning,
+                    });
+                }
+                Err(error) => {
+                    let _ = tx.send(RestoreEvent::Failed { error });
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("start restore worker: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
     use std::path::PathBuf;
+
+    struct RestoreFixture {
+        _tmp: tempfile::TempDir,
+        origin: PathBuf,
+        dest: PathBuf,
+        registry: PathBuf,
+        record: MoveRecord,
+        roots: RestoreRoots,
+    }
+
+    impl RestoreFixture {
+        fn new(exact_link: bool) -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = tmp.path().join("home");
+            let volumes = tmp.path().join("Volumes");
+            let origin = home.join("Movies/clip.mov");
+            let dest = volumes.join("<external>/DiskDeck Offload/Users/<user>/Movies/clip.mov");
+            let registry = tmp.path().join("index.ddmoves");
+            std::fs::create_dir_all(origin.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            std::fs::write(&dest, b"external copy").unwrap();
+            if exact_link {
+                std::os::unix::fs::symlink(&dest, &origin).unwrap();
+            }
+            let record = MoveRecord::new(
+                origin.clone(),
+                dest.clone(),
+                42,
+                b"external copy".len() as i64,
+                exact_link,
+            );
+            upsert_record(&registry, record.clone()).unwrap();
+            Self {
+                _tmp: tmp,
+                origin,
+                dest,
+                registry,
+                record,
+                roots: RestoreRoots { home, volumes },
+            }
+        }
+    }
 
     fn record(index: i64) -> MoveRecord {
         MoveRecord {
@@ -628,5 +988,75 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].record.dest, valid_dest);
+    }
+
+    #[test]
+    fn restore_refuses_an_occupied_origin_without_touching_either_copy() {
+        let fixture = RestoreFixture::new(false);
+        std::fs::write(&fixture.origin, b"new local file").unwrap();
+
+        let error = preflight_restore(&fixture.record, &fixture.roots).unwrap_err();
+
+        assert_eq!(error, RestoreBlock::OriginChanged);
+        assert_eq!(std::fs::read(&fixture.origin).unwrap(), b"new local file");
+        assert_eq!(std::fs::read(&fixture.dest).unwrap(), b"external copy");
+    }
+
+    #[test]
+    fn restore_replaces_only_the_exact_origin_link_after_verified_copy() {
+        let fixture = RestoreFixture::new(true);
+
+        let outcome = perform_restore(&fixture.record, &fixture.registry, &fixture.roots).unwrap();
+
+        assert_eq!(outcome.restored, b"external copy".len() as i64);
+        assert!(outcome.warning.is_none());
+        assert!(!std::fs::symlink_metadata(&fixture.origin)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&fixture.origin).unwrap(), b"external copy");
+        assert!(!fixture.dest.exists());
+        assert!(load_records(&fixture.registry).unwrap()[0]
+            .restored_at
+            .is_some());
+    }
+
+    #[test]
+    fn restore_detects_destination_replacement_before_external_delete() {
+        let fixture = RestoreFixture::new(false);
+        std::fs::write(&fixture.origin, b"installed copy").unwrap();
+        let identity = crate::transfer::path_identity(&fixture.dest).unwrap();
+        std::fs::remove_file(&fixture.dest).unwrap();
+        std::fs::write(&fixture.dest, b"replacement").unwrap();
+
+        assert!(remove_verified_target(&fixture.dest, identity).is_err());
+
+        assert_eq!(std::fs::read(&fixture.dest).unwrap(), b"replacement");
+        assert_eq!(std::fs::read(&fixture.origin).unwrap(), b"installed copy");
+    }
+
+    #[test]
+    fn failed_install_rename_restores_the_backed_up_symlink() {
+        let fixture = RestoreFixture::new(true);
+        let missing_staging = fixture.origin.with_extension("missing-stage");
+        let backup = fixture.origin.with_extension("diskdeck-link-backup");
+
+        assert!(
+            install_staged_origin(&fixture.origin, &missing_staging, &backup, &fixture.dest,)
+                .is_err()
+        );
+
+        assert_eq!(std::fs::read_link(&fixture.origin).unwrap(), fixture.dest);
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn restore_confirmation_requires_acknowledgement_and_clean_preflight() {
+        assert!(can_confirm_restore(true, None));
+        assert!(!can_confirm_restore(false, None));
+        assert!(!can_confirm_restore(
+            true,
+            Some(RestoreBlock::OriginChanged)
+        ));
     }
 }

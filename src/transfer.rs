@@ -3,6 +3,8 @@
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
+pub(crate) const MARGIN_BYTES: i64 = 100 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PathIdentity {
     pub dev: u64,

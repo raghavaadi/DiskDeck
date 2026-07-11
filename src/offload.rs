@@ -31,7 +31,7 @@ pub fn dest_for(src: &Path, mount_path: &Path) -> PathBuf {
 }
 
 /// Free-space margin required on the target beyond the item's own size.
-pub const MARGIN_BYTES: i64 = 100 * 1024 * 1024;
+pub const MARGIN_BYTES: i64 = crate::transfer::MARGIN_BYTES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OffloadBlock {
