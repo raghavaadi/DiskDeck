@@ -4,11 +4,13 @@
 
 use std::ffi::{CStr, CString};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use crate::clean::{delete_path, quick_du};
+use crate::transfer::{
+    apparent_size, ensure_absent, ensure_same_identity, path_identity, verified_ditto_copy,
+};
 
 /// An attached external volume eligible as an offload target.
 #[derive(Clone)]
@@ -240,68 +242,10 @@ fn statfs_info(mount: &Path) -> Option<(String, bool, i64)> {
     Some((fs_type, read_only, free))
 }
 
-/// Logical (apparent) size of a path: the sum of regular files' `len()`,
-/// filesystem-independent unlike block-based `quick_du`. A single file
-/// returns its own length; a directory sums its regular-file descendants.
-/// Symlinks are not followed — their entries contribute 0.
-fn apparent_size(p: &Path) -> i64 {
-    let mut total = 0i64;
-    if let Ok(meta) = p.symlink_metadata() {
-        if meta.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(p) {
-                for e in entries.flatten() {
-                    total += apparent_size(&e.path());
-                }
-            }
-        } else if meta.is_file() {
-            total += meta.len() as i64;
-        }
-        // symlinks (and other non-regular entries) contribute 0
-    }
-    total
-}
-
 pub struct MoveOutcome {
     pub dest: PathBuf,
     pub reclaimed: i64,
     pub symlinked: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SourceIdentity {
-    dev: u64,
-    ino: u64,
-}
-
-fn source_identity(path: &Path) -> Result<SourceIdentity, String> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("inspect source before copy: {error}"))?;
-    if metadata.file_type().is_symlink() {
-        return Err("source became a symlink; original left intact".into());
-    }
-    Ok(SourceIdentity {
-        dev: metadata.dev(),
-        ino: metadata.ino(),
-    })
-}
-
-fn ensure_source_unchanged(path: &Path, expected: SourceIdentity) -> Result<(), String> {
-    let current = source_identity(path)?;
-    if current != expected {
-        return Err("source changed during copy; original left intact".into());
-    }
-    Ok(())
-}
-
-fn check_destination_absent(dest: &Path) -> Result<(), String> {
-    match std::fs::symlink_metadata(dest) {
-        Ok(_) => Err(format!(
-            "destination already exists at {}; original left intact",
-            dest.display()
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("inspect destination before copy: {error}")),
-    }
 }
 
 /// Verified cross-volume move. Order is the safety contract:
@@ -313,40 +257,13 @@ pub fn perform_move(
     ledger_path: &Path,
     leave_symlink: bool,
 ) -> Result<MoveOutcome, String> {
-    check_destination_absent(dest)?;
-    let source_identity = source_identity(src)?;
+    ensure_absent(dest, "destination")?;
+    let source_identity = path_identity(src)?;
     let total = quick_du(src);
-    let src_apparent = apparent_size(src);
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("prepare destination: {e}"))?;
-    }
-
-    // 1. copy
-    let out = std::process::Command::new("/usr/bin/ditto")
-        .arg(src)
-        .arg(dest)
-        .output()
-        .map_err(|e| format!("ditto: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "copy failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-
-    // 2. verify — by apparent (logical) size, not disk blocks. ditto drops
-    // xattrs/resource forks when copying onto exFAT, which legitimately
-    // shrinks block-based usage even on a byte-perfect copy; apparent size
-    // is filesystem-independent.
-    let dest_apparent = apparent_size(dest);
-    if dest_apparent < src_apparent {
-        return Err(format!(
-            "verify failed: copied {dest_apparent} < source {src_apparent} bytes; original left intact"
-        ));
-    }
+    verified_ditto_copy(src, dest)?;
 
     // 3. confirm the original path still names the same inode, then delete.
-    ensure_source_unchanged(src, source_identity)?;
+    ensure_same_identity(src, source_identity)?;
     delete_path(src)?;
 
     // 4. optional symlink at the origin, pointing at the new location
@@ -473,7 +390,7 @@ pub fn run_offload(job: OffloadJob, tx: Sender<OffloadEvent>) {
             }
 
             let dest = dest_for(&job.src, &job.mount_path);
-            if let Err(error) = check_destination_absent(&dest) {
+            if let Err(error) = ensure_absent(&dest, "destination") {
                 let _ = tx.send(OffloadEvent::Failed { error });
                 return;
             }
@@ -715,10 +632,10 @@ mod tests {
         let src = tmp.path().join("src.txt");
         let parked = tmp.path().join("parked.txt");
         fs::write(&src, b"first").unwrap();
-        let identity = source_identity(&src).unwrap();
+        let identity = path_identity(&src).unwrap();
         fs::rename(&src, &parked).unwrap();
         fs::write(&src, b"second").unwrap();
-        assert!(ensure_source_unchanged(&src, identity).is_err());
+        assert!(ensure_same_identity(&src, identity).is_err());
     }
 
     #[test]

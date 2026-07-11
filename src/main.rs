@@ -7,6 +7,7 @@ mod offload;
 mod rules;
 mod scan;
 mod theme;
+mod transfer;
 mod treemap;
 
 use std::sync::Arc;
