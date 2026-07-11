@@ -248,9 +248,10 @@ cannot be published accidentally.
 ## Project history
 
 Born 2026-06-12 after a manual cleanup session recovered ~70 GB. The v2
-roadmap proceeds through regrowth history, moved-item restore, an optional
-Developer Lens, APFS accounting, app-leftover detection, and a menu-bar
-free-space monitor—one independently verified slice at a time.
+roadmap shipped as independently verified slices: regrowth history, verified
+move-back, Growth Watch, Developer Lens, honest APFS accounting, conservative
+app leftovers, the opt-in menu-bar monitor, and read-only duplicate/large-old
+review.
 
 Fonts: Inter (SIL OFL, see `assets/fonts/LICENSE.txt`) for the native-width UI;
 paths and scan data use egui's built-in Hack.

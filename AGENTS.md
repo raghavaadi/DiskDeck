@@ -165,8 +165,8 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
   appearance and a calm Storage Observatory dark appearance. The live storage
   map is the signature surface; surrounding chrome stays quiet. Color is
   semantic: mint=safe, amber=review, red=danger, cyan=navigation/scanning.
-- The committed v2 roadmap is safety foundation → regrowth history → moved-item
-  restore → optional Developer Lens → APFS accounting → app leftovers →
-  menu-bar monitor. Deliver and verify one independent slice at a time.
+- The committed v2 roadmap (safety, regrowth, restore, Growth Watch, Developer
+  Lens, APFS, app leftovers, menu monitor, and file review) is shipped. Future
+  changes still deliver and verify one independent slice at a time.
 - Commit style: imperative subject, body explains the why. `cargo test`
   before every commit.
