@@ -68,6 +68,15 @@ on largestTileCenter(appGroup)
     return ((round bestX) as text) & " " & ((round bestY) as text)
 end largestTileCenter
 
+on openInsights(appGroup)
+    tell application "System Events"
+        if exists button "Insights" of appGroup then
+            click button "Insights" of appGroup
+            delay 0.4
+        end if
+    end tell
+end openInsights
+
 on run argv
     set commandName to "check"
     if (count of argv) > 0 then set commandName to item 1 of argv
@@ -101,32 +110,43 @@ on run argv
             else if commandName is "menu-visible" then
                 return my menuIsVisible(appGroup)
             else if commandName is "moved-items-visible" then
+                my openInsights(appGroup)
                 if not (exists button "Moved items" of appGroup) then error "Moved items control is unavailable." number 1
                 click button "Moved items" of appGroup
                 delay 0.5
-                if not (exists button "← Reclaim summary" of appGroup) then error "Moved items rail did not open." number 1
+                if not (exists button "← Insights" of appGroup) then error "Moved items rail did not open." number 1
                 if not (exists button "Refresh" of appGroup) then error "Moved items Refresh control is unavailable." number 1
                 return "PASS: Moved items rail available"
             else if commandName is "growth-watch-visible" then
+                my openInsights(appGroup)
                 if not (exists button "Growth Watch" of appGroup) then error "Growth Watch control is unavailable." number 1
                 click button "Growth Watch" of appGroup
                 delay 0.5
-                if not (exists button "← Reclaim summary" of appGroup) then error "Growth Watch rail did not open." number 1
+                if not (exists button "← Insights" of appGroup) then error "Growth Watch rail did not open." number 1
                 if not (exists button "Refresh" of appGroup) then error "Growth Watch Refresh control is unavailable." number 1
                 return "PASS: Growth Watch rail available"
             else if commandName is "developer-lens-visible" then
+                my openInsights(appGroup)
                 if not (exists button "Developer Lens" of appGroup) then error "Developer Lens control is unavailable." number 1
                 click button "Developer Lens" of appGroup
                 delay 0.5
-                if not (exists button "← Reclaim summary" of appGroup) then error "Developer Lens rail did not open." number 1
+                if not (exists button "← Insights" of appGroup) then error "Developer Lens rail did not open." number 1
                 return "PASS: Developer Lens rail available"
             else if commandName is "apfs-accounting-visible" then
+                my openInsights(appGroup)
                 if not (exists button "APFS accounting" of appGroup) then error "APFS accounting control is unavailable." number 1
                 click button "APFS accounting" of appGroup
                 delay 0.5
-                if not (exists button "← Reclaim summary" of appGroup) then error "APFS accounting rail did not open." number 1
+                if not (exists button "← Insights" of appGroup) then error "APFS accounting rail did not open." number 1
                 if not (exists button "Refresh" of appGroup) then error "APFS Refresh control is unavailable." number 1
                 return "PASS: APFS accounting rail available"
+            else if commandName is "app-leftovers-visible" then
+                my openInsights(appGroup)
+                if not (exists button "App leftovers" of appGroup) then error "App leftovers control is unavailable." number 1
+                click button "App leftovers" of appGroup
+                delay 0.5
+                if not (exists button "← Insights" of appGroup) then error "App leftovers rail did not open." number 1
+                return "PASS: App leftovers rail available"
             else if commandName is "escape" then
                 key code 53
                 return "PASS: Escape sent"
@@ -139,7 +159,7 @@ on run argv
                 if afterSignature is beforeSignature then error "Back did not change the breadcrumb." number 1
                 return "PASS: Back navigation"
             else
-                error "Usage: ui-smoke.applescript check|signature|tile-center|menu-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|escape|back" number 1
+                error "Usage: ui-smoke.applescript check|signature|tile-center|menu-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|escape|back" number 1
             end if
         end tell
     end tell

@@ -73,6 +73,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 | `clean.rs` | trash/delete/empty/command executors + background orchestrator (mpsc events) | **trash = `os::rename` into `~/.Trash` FIRST** — Finder-osascript hangs silently without the Automation TCC grant and is fallback only; `delete_path` chmods-and-retries for write-protected trees (go-modcache style) |
 | `developer.rs` | read-only Developer Lens classifier over existing recommendations | never invent new commands, totals, or eligibility; ordinary cleanup rows stay out and the default summary remains unchanged |
 | `apfs.rs` | fixed-command APFS container and snapshot accounting | never accept UI-supplied command/device input; unavailable purgeable/snapshot bytes stay unavailable and outside reclaimable totals |
+| `leftovers.rs` | read-only large sandbox absence proof | exact bundle-ID-shaped `Library/Containers` entries only; lookup failure means omit; findings stay Caution/reveal-only |
 | `history.rs` | compact completed-scan snapshots, previous-scan comparison, Growth Watch timeline/watchlist, atomic retention worker | raw path bytes must round-trip; corrupt snapshots are skipped; corrupt watchlists are never overwritten; no always-on scan is started |
 | `transfer.rs` | shared path-identity, collision, apparent-size, and verified-ditto primitives | copy helpers never remove either side; callers own the final identity recheck and deletion order |
 | `offload.rs` | protected-path policy, external-volume checks, verified copy/move, ledger, worker events | UI eligibility is advisory; the worker must repeat full policy/target/capacity checks, and only a matching source identity may reach `delete_path` |
@@ -152,7 +153,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 
 ## Repo conventions
 
-- Flat module layout (`scan/rules/clean/history/transfer/offload/moves/developer/apfs/treemap/theme/app`), one concern per
+- Flat module layout (`scan/rules/clean/history/transfer/offload/moves/developer/apfs/leftovers/treemap/theme/app`), one concern per
   file. No new crate dependencies without strong reason.
 - The approved aesthetic is **Adaptive Native**: a crisp, familiar macOS light
   appearance and a calm Storage Observatory dark appearance. The live storage

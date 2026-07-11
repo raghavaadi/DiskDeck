@@ -5,6 +5,7 @@ mod app;
 mod clean;
 mod developer;
 mod history;
+mod leftovers;
 mod moves;
 mod offload;
 mod rules;

@@ -31,6 +31,10 @@ compiler proves there are no data races.
   space and local snapshot count from file recommendations. Snapshot byte size
   and purgeable capacity stay explicitly unavailable when macOS does not
   report reliable exact values; neither is advertised as reclaimable.
+- **Conservative app leftovers** — inspect large per-app sandbox containers
+  only when their directory is an exact bundle identifier and no installed app
+  or extension can be verified. Findings are Caution and read-only; uncertain
+  matches are omitted.
 - **DaisyDisk-style zoom** — drilling into a region animates it expanding to
   fill the view. A visible Back button and clickable breadcrumbs make the
   route home obvious.
@@ -154,10 +158,12 @@ point) but are never suggested for deletion.
 | click rec title | expand explainer |
 | click action chip | toggle → TRASH / ERASE |
 | click Review targets | inspect the reclaim plan before acting |
-| click Moved items | inspect offloaded items and their restore readiness |
-| click Growth Watch | inspect retained scan trends and recurring growers |
-| click Developer Lens | explain measured developer storage by tool family |
-| click APFS accounting | inspect container capacity and snapshot accounting |
+| click Insights | open the bounded local-insights hub |
+| click Moved items in Insights | inspect offloaded items and their restore readiness |
+| click Growth Watch in Insights | inspect retained scan trends and recurring growers |
+| click Developer Lens in Insights | explain measured developer storage by tool family |
+| click APFS accounting in Insights | inspect container capacity and snapshot accounting |
+| click App leftovers in Insights | inspect evidence-backed sandbox leftovers; reveal only |
 | click Watch / Unwatch | update the local folder watchlist |
 | click Restore to Mac… | review why an item can or cannot be restored |
 | hold restore button 0.9 s | restore one acknowledged, preflighted item |
@@ -199,6 +205,7 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 | `history.rs` | lossless snapshot/watchlist codecs, corruption handling, compact-tree capture, comparison threshold/order, recurring-growth timeline, atomic retention without touching unrelated files |
 | `developer.rs` | deterministic grouping, stable ordering, totals, Caution counts, and exclusion of ordinary cleanup rows |
 | `apfs.rs` | fixed-command APFS plist parsing, bounded values, snapshot count, and timeout/failure behavior |
+| `leftovers.rs` | bundle-ID policy, ≥250 MB floor, exact installed-app absence proof, conservative omission |
 | `transfer.rs` | shared collision, filesystem-identity, apparent-size, and verified-copy primitives |
 | `offload.rs` | protected-path policy, worker revalidation, destination collision, source identity, capacity margin, verified moves, symlink behavior, local move-record persistence, event ordering |
 | `moves.rs` | lossless registry codec, atomic bounded storage, legacy-ledger import, health classification, restore preflight, rollback, and worker events |

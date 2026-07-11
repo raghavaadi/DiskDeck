@@ -10,6 +10,7 @@ use crate::history::{
     default_history_dir, load_growth_watch, record_scan, set_folder_watched, GrowthSummary,
     GrowthWatch, HistoryEvent, TimelinePoint,
 };
+use crate::leftovers::{self, LeftoverFinding};
 use crate::moves::{
     can_confirm_restore, refresh_records, registry_path_for_home, restore_block, run_restore,
     state_reason, MoveState, MovedItem, RestoreBlock, RestoreEvent, RestoreJob, RestoreRoots,
@@ -82,20 +83,23 @@ struct OffloadDialog {
 enum RailView {
     Summary,
     Reclaim,
+    Insights,
     Moved,
     Growth,
     Developer,
     Apfs,
+    Leftovers,
 }
 
 fn rail_back_target(view: RailView) -> Option<RailView> {
     match view {
         RailView::Summary => None,
-        RailView::Reclaim
-        | RailView::Moved
+        RailView::Reclaim | RailView::Insights => Some(RailView::Summary),
+        RailView::Moved
         | RailView::Growth
         | RailView::Developer
-        | RailView::Apfs => Some(RailView::Summary),
+        | RailView::Apfs
+        | RailView::Leftovers => Some(RailView::Insights),
     }
 }
 
@@ -142,6 +146,9 @@ pub struct App {
     apfs_rx: Option<Receiver<Result<ApfsAccounting, String>>>,
     apfs: Option<ApfsAccounting>,
     apfs_error: Option<String>,
+    leftovers_rx: Option<Receiver<Result<Vec<LeftoverFinding>, String>>>,
+    leftovers: Vec<LeftoverFinding>,
+    leftovers_error: Option<String>,
 }
 
 fn now_hms() -> String {
@@ -291,6 +298,9 @@ impl App {
             apfs_rx: None,
             apfs: None,
             apfs_error: None,
+            leftovers_rx: None,
+            leftovers: Vec::new(),
+            leftovers_error: None,
         }
     }
 
@@ -382,6 +392,7 @@ impl App {
             })
             .collect();
         self.recs_built = true;
+        self.begin_leftovers(root.clone());
         if should_record_history(state) {
             if let Some(dir) = default_history_dir() {
                 let (tx, rx) = std::sync::mpsc::channel();
@@ -558,6 +569,49 @@ impl App {
                 self.ops(
                     OpsKind::Amber,
                     format!("APFS accounting unavailable — {error}"),
+                );
+            }
+        }
+    }
+
+    fn begin_leftovers(&mut self, root: Arc<Node>) {
+        if self.leftovers_rx.is_some() {
+            return;
+        }
+        let home = Self::home_dir();
+        let (tx, rx) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("app-leftovers".into())
+            .spawn(move || {
+                let _ = tx.send(leftovers::detect(&root, &home));
+            }) {
+            Ok(_) => {
+                self.leftovers_rx = Some(rx);
+                self.leftovers_error = None;
+            }
+            Err(error) => self.leftovers_error = Some(format!("start app leftovers: {error}")),
+        }
+    }
+
+    fn poll_leftovers(&mut self) {
+        let result = match self.leftovers_rx.as_ref().map(Receiver::try_recv) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Some(Err("app-leftovers worker stopped before reporting".into()))
+            }
+        };
+        self.leftovers_rx = None;
+        match result.unwrap() {
+            Ok(findings) => {
+                self.leftovers = findings;
+                self.leftovers_error = None;
+            }
+            Err(error) => {
+                self.leftovers_error = Some(error.clone());
+                self.ops(
+                    OpsKind::Amber,
+                    format!("app leftovers unavailable — {error}"),
                 );
             }
         }
@@ -998,13 +1052,21 @@ mod tests {
     fn rail_back_returns_each_detail_view_to_summary() {
         assert_eq!(rail_back_target(RailView::Summary), None);
         assert_eq!(rail_back_target(RailView::Reclaim), Some(RailView::Summary));
-        assert_eq!(rail_back_target(RailView::Moved), Some(RailView::Summary));
-        assert_eq!(rail_back_target(RailView::Growth), Some(RailView::Summary));
         assert_eq!(
-            rail_back_target(RailView::Developer),
+            rail_back_target(RailView::Insights),
             Some(RailView::Summary)
         );
-        assert_eq!(rail_back_target(RailView::Apfs), Some(RailView::Summary));
+        assert_eq!(rail_back_target(RailView::Moved), Some(RailView::Insights));
+        assert_eq!(rail_back_target(RailView::Growth), Some(RailView::Insights));
+        assert_eq!(
+            rail_back_target(RailView::Developer),
+            Some(RailView::Insights)
+        );
+        assert_eq!(rail_back_target(RailView::Apfs), Some(RailView::Insights));
+        assert_eq!(
+            rail_back_target(RailView::Leftovers),
+            Some(RailView::Insights)
+        );
     }
 
     #[test]
@@ -1303,6 +1365,7 @@ impl eframe::App for App {
         self.poll_restore();
         self.poll_growth_watch();
         self.poll_apfs();
+        self.poll_leftovers();
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             if self.restore_dialog.take().is_some() {
                 self.restore_hold = 0.0;
@@ -1328,6 +1391,7 @@ impl eframe::App for App {
             || self.restore_dialog.is_some()
             || self.growth_watch_rx.is_some()
             || self.apfs_rx.is_some()
+            || self.leftovers_rx.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(40));
         }
@@ -1996,6 +2060,10 @@ impl App {
                 self.draw_reclaim_summary(ui, rect);
                 return;
             }
+            RailView::Insights => {
+                self.draw_insights(ui, rect);
+                return;
+            }
             RailView::Moved => {
                 self.draw_moved_items(ui, rect);
                 return;
@@ -2010,6 +2078,10 @@ impl App {
             }
             RailView::Apfs => {
                 self.draw_apfs_accounting(ui, rect);
+                return;
+            }
+            RailView::Leftovers => {
+                self.draw_app_leftovers(ui, rect);
                 return;
             }
             RailView::Reclaim => {}
@@ -2210,13 +2282,8 @@ impl App {
             vec2(rect.width(), 34.0),
         );
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(moved_rect), |ui| {
-            let count = self
-                .moved_items
-                .iter()
-                .filter(|item| item.state != MoveState::Restored)
-                .count();
             let button = egui::Button::new(
-                RichText::new("Moved items")
+                RichText::new("Insights")
                     .font(theme::display_md(10.5))
                     .color(palette.accent),
             )
@@ -2225,80 +2292,12 @@ impl App {
             .rounding(Rounding::same(8.0));
             if ui
                 .add_sized(ui.available_size(), button)
-                .on_hover_text(format!("Review {count} item(s) currently stored away"))
+                .on_hover_text("Moved items, growth, developer storage, APFS, and app leftovers")
                 .clicked()
             {
-                self.rail_view = RailView::Moved;
-                self.begin_move_refresh();
+                self.rail_view = RailView::Insights;
             }
         });
-        let growth_rect = Rect::from_min_size(
-            pos2(rect.min.x, moved_rect.max.y + 8.0),
-            vec2(rect.width(), 34.0),
-        );
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(growth_rect), |ui| {
-            let snapshots = self.growth_watch.timeline.len();
-            let button = egui::Button::new(
-                RichText::new("Growth Watch")
-                    .font(theme::display_md(10.5))
-                    .color(palette.accent),
-            )
-            .fill(palette.surface)
-            .stroke(Stroke::new(1.0, palette.edge_soft))
-            .rounding(Rounding::same(8.0));
-            if ui
-                .add_sized(ui.available_size(), button)
-                .on_hover_text(format!("Review {snapshots} retained scan snapshot(s)"))
-                .clicked()
-            {
-                self.rail_view = RailView::Growth;
-                self.begin_growth_refresh();
-            }
-        });
-        let developer_rect = Rect::from_min_size(
-            pos2(rect.min.x, growth_rect.max.y + 8.0),
-            vec2(rect.width(), 34.0),
-        );
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(developer_rect), |ui| {
-            let button = egui::Button::new(
-                RichText::new("Developer Lens")
-                    .font(theme::display_md(10.5))
-                    .color(palette.accent),
-            )
-            .fill(palette.surface)
-            .stroke(Stroke::new(1.0, palette.edge_soft))
-            .rounding(Rounding::same(8.0));
-            if ui
-                .add_sized(ui.available_size(), button)
-                .on_hover_text("Explain local developer storage without changing the reclaim plan")
-                .clicked()
-            {
-                self.rail_view = RailView::Developer;
-            }
-        });
-        let apfs_rect = Rect::from_min_size(
-            pos2(rect.min.x, developer_rect.max.y + 8.0),
-            vec2(rect.width(), 34.0),
-        );
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(apfs_rect), |ui| {
-            let button = egui::Button::new(
-                RichText::new("APFS accounting")
-                    .font(theme::display_md(10.5))
-                    .color(palette.accent),
-            )
-            .fill(palette.surface)
-            .stroke(Stroke::new(1.0, palette.edge_soft))
-            .rounding(Rounding::same(8.0));
-            if ui
-                .add_sized(ui.available_size(), button)
-                .on_hover_text("Separate measured container capacity from system-managed space")
-                .clicked()
-            {
-                self.rail_view = RailView::Apfs;
-                self.begin_apfs_refresh();
-            }
-        });
-
         let footer = Rect::from_min_max(pos2(rect.min.x, rect.max.y - 112.0), rect.max);
         let footer_fill = if ui.visuals().dark_mode {
             Color32::from_rgb(0x14, 0x2a, 0x2c)
@@ -2360,6 +2359,105 @@ impl App {
         }
     }
 
+    fn draw_insights(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let content = panel_chrome(
+            ui,
+            rect,
+            "Insights",
+            Some(("local · read-only views".into(), palette.faint)),
+        );
+        let nav = Rect::from_min_size(
+            content.min + vec2(10.0, 4.0),
+            vec2(content.width() - 20.0, 30.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(nav), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("← Reclaim summary")
+                            .font(theme::display_md(10.5))
+                            .color(palette.accent),
+                    )
+                    .frame(false),
+                )
+                .clicked()
+            {
+                self.rail_view = RailView::Summary;
+            }
+        });
+        let body = Rect::from_min_max(
+            pos2(content.min.x + 10.0, nav.max.y + 5.0),
+            pos2(content.max.x - 10.0, content.max.y - 4.0),
+        );
+        let moved_count = self
+            .moved_items
+            .iter()
+            .filter(|item| item.state != MoveState::Restored)
+            .count();
+        let entries = [
+            (
+                "Moved items",
+                format!("{moved_count} currently away"),
+                RailView::Moved,
+            ),
+            (
+                "Growth Watch",
+                format!("{} retained scans", self.growth_watch.timeline.len()),
+                RailView::Growth,
+            ),
+            (
+                "Developer Lens",
+                "Explain measured tool storage".into(),
+                RailView::Developer,
+            ),
+            (
+                "APFS accounting",
+                "Container, snapshots, purgeable truth".into(),
+                RailView::Apfs,
+            ),
+            (
+                "App leftovers",
+                format!("{} evidence-backed finding(s)", self.leftovers.len()),
+                RailView::Leftovers,
+            ),
+        ];
+        let mut open = None;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(body), |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for (title, detail, target) in entries {
+                        let button = egui::Button::new(
+                            RichText::new(title)
+                                .font(theme::display_md(11.0))
+                                .color(palette.ink),
+                        )
+                        .fill(palette.surface)
+                        .stroke(Stroke::new(1.0, palette.edge_soft))
+                        .rounding(Rounding::same(9.0));
+                        if ui
+                            .add_sized(vec2(ui.available_width(), 42.0), button)
+                            .on_hover_text(detail)
+                            .clicked()
+                        {
+                            open = Some(target);
+                        }
+                        ui.add_space(7.0);
+                    }
+                });
+        });
+        if let Some(target) = open {
+            self.rail_view = target;
+            match target {
+                RailView::Moved => self.begin_move_refresh(),
+                RailView::Growth => self.begin_growth_refresh(),
+                RailView::Apfs => self.begin_apfs_refresh(),
+                _ => {}
+            }
+        }
+    }
+
     fn draw_moved_items(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let palette = theme::palette(ui.ctx());
         let active = self
@@ -2378,7 +2476,7 @@ impl App {
                 if ui
                     .add(
                         egui::Button::new(
-                            RichText::new("← Reclaim summary")
+                            RichText::new("← Insights")
                                 .font(theme::display_md(10.5))
                                 .color(palette.accent),
                         )
@@ -2386,7 +2484,7 @@ impl App {
                     )
                     .clicked()
                 {
-                    self.rail_view = RailView::Summary;
+                    self.rail_view = RailView::Insights;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
@@ -2553,7 +2651,7 @@ impl App {
                 if ui
                     .add(
                         egui::Button::new(
-                            RichText::new("← Reclaim summary")
+                            RichText::new("← Insights")
                                 .font(theme::display_md(10.5))
                                 .color(palette.accent),
                         )
@@ -2561,7 +2659,7 @@ impl App {
                     )
                     .clicked()
                 {
-                    self.rail_view = RailView::Summary;
+                    self.rail_view = RailView::Insights;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
@@ -2792,7 +2890,7 @@ impl App {
             if ui
                 .add(
                     egui::Button::new(
-                        RichText::new("← Reclaim summary")
+                        RichText::new("← Insights")
                             .font(theme::display_md(10.5))
                             .color(palette.accent),
                     )
@@ -2800,7 +2898,7 @@ impl App {
                 )
                 .clicked()
             {
-                self.rail_view = RailView::Summary;
+                self.rail_view = RailView::Insights;
             }
         });
         let list = Rect::from_min_max(
@@ -2950,7 +3048,7 @@ impl App {
                 if ui
                     .add(
                         egui::Button::new(
-                            RichText::new("← Reclaim summary")
+                            RichText::new("← Insights")
                                 .font(theme::display_md(10.5))
                                 .color(palette.accent),
                         )
@@ -2958,7 +3056,7 @@ impl App {
                     )
                     .clicked()
                 {
-                    self.rail_view = RailView::Summary;
+                    self.rail_view = RailView::Insights;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
@@ -3079,6 +3177,130 @@ impl App {
                 .color(palette.muted),
             );
         });
+    }
+
+    fn draw_app_leftovers(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let total: i64 = self.leftovers.iter().map(|finding| finding.bytes).sum();
+        let meta = format!("{} findings · {}", self.leftovers.len(), fmt_bytes(total));
+        let content = panel_chrome(ui, rect, "App leftovers", Some((meta, palette.faint)));
+        let nav = Rect::from_min_size(
+            content.min + vec2(10.0, 4.0),
+            vec2(content.width() - 20.0, 30.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(nav), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("← Insights")
+                            .font(theme::display_md(10.5))
+                            .color(palette.accent),
+                    )
+                    .frame(false),
+                )
+                .clicked()
+            {
+                self.rail_view = RailView::Insights;
+            }
+        });
+        let body = Rect::from_min_max(
+            pos2(content.min.x + 10.0, nav.max.y + 5.0),
+            pos2(content.max.x - 10.0, content.max.y - 4.0),
+        );
+        let mut reveal = None;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(body), |ui| {
+            if let Some(error) = &self.leftovers_error {
+                ui.label(
+                    RichText::new(format!("App leftovers unavailable\n{error}"))
+                        .font(theme::body(10.5))
+                        .color(palette.danger),
+                );
+                return;
+            }
+            if self.leftovers_rx.is_some() {
+                ui.label(
+                    RichText::new("Verifying large sandbox bundle identifiers locally…")
+                        .font(theme::body(10.5))
+                        .color(palette.muted),
+                );
+                return;
+            }
+            if self.leftovers.is_empty() {
+                ui.label(
+                    RichText::new(
+                        "No large app sandbox passed the conservative absence proof. Uncertain matches are omitted.",
+                    )
+                    .font(theme::body(10.5))
+                    .color(palette.muted),
+                );
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(
+                            "CAUTION · read-only findings · inspect in Finder before deciding anything.",
+                        )
+                        .font(theme::body(9.5))
+                        .color(palette.caution),
+                    );
+                    ui.add_space(6.0);
+                    for finding in &self.leftovers {
+                        Frame::none()
+                            .fill(palette.surface)
+                            .stroke(Stroke::new(1.0, palette.edge_soft))
+                            .rounding(Rounding::same(9.0))
+                            .inner_margin(Margin::symmetric(10.0, 9.0))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(tail_str(&finding.bundle_id, 32))
+                                            .font(theme::display_md(10.5))
+                                            .color(palette.ink),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                RichText::new(fmt_bytes(finding.bytes))
+                                                    .font(theme::mono(10.0))
+                                                    .color(palette.caution),
+                                            );
+                                        },
+                                    );
+                                });
+                                ui.label(
+                                    RichText::new(tail_str(
+                                        &finding.path.display().to_string(),
+                                        40,
+                                    ))
+                                    .font(theme::mono(8.5))
+                                    .color(palette.faint),
+                                );
+                                ui.label(
+                                    RichText::new(&finding.evidence)
+                                        .font(theme::body(9.0))
+                                        .color(palette.muted),
+                                );
+                                if ui
+                                    .button(
+                                        RichText::new("Reveal in Finder")
+                                            .font(theme::mono(9.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    reveal = Some(finding.path.clone());
+                                }
+                            });
+                        ui.add_space(6.0);
+                    }
+                });
+        });
+        if let Some(path) = reveal {
+            reveal_in_finder(&path);
+        }
     }
 
     /// One recommendation card. Returns Some(path) if "reveal" was clicked.
