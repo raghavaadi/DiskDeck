@@ -483,7 +483,7 @@ fn build_growth_watch(snapshots: &[Snapshot], watched_paths: &[PathBuf]) -> Grow
             }
         })
         .collect();
-    recurring.retain(|growth| growth.bytes_delta > 0);
+    recurring.retain(|growth| growth.bytes_delta > 0 && growth.positive_intervals >= 2);
     let candidates = recurring.clone();
     recurring.retain(|candidate| {
         !candidates.iter().any(|other| {
@@ -854,18 +854,24 @@ mod tests {
             Snapshot {
                 captured_at_ms: 20,
                 root: root.clone(),
-                total_bytes: 50 * MB,
-                entries: vec![entry("Users/project", 50 * MB)],
+                total_bytes: 40 * MB,
+                entries: vec![entry("Users/project", 40 * MB)],
             },
             Snapshot {
                 captured_at_ms: 30,
+                root: root.clone(),
+                total_bytes: 60 * MB,
+                entries: vec![entry("Users/project", 60 * MB)],
+            },
+            Snapshot {
+                captured_at_ms: 40,
                 root,
                 total_bytes: 35 * MB,
                 entries: vec![entry("Users/project", 35 * MB)],
             },
         ];
         let watch = build_growth_watch(&snapshots, &[]);
-        assert_eq!(watch.recurring[0].positive_intervals, 1);
+        assert_eq!(watch.recurring[0].positive_intervals, 2);
         assert_eq!(watch.recurring[0].bytes_delta, 15 * MB);
         assert_eq!(watch.recurring[0].percent_tenths, Some(750));
     }
@@ -886,7 +892,7 @@ mod tests {
             },
             Snapshot {
                 captured_at_ms: 20,
-                root: root,
+                root: root.clone(),
                 total_bytes: 130 * MB,
                 entries: vec![
                     entry("Users", 80 * MB),
@@ -894,11 +900,21 @@ mod tests {
                     entry("private", 20 * MB),
                 ],
             },
+            Snapshot {
+                captured_at_ms: 30,
+                root,
+                total_bytes: 160 * MB,
+                entries: vec![
+                    entry("Users", 110 * MB),
+                    entry("Users/project", 101 * MB),
+                    entry("private", 10 * MB),
+                ],
+            },
         ];
         let watch = build_growth_watch(&snapshots, &[]);
         assert_eq!(watch.recurring.len(), 1);
         assert_eq!(watch.recurring[0].path, PathBuf::from("Users/project"));
-        assert_eq!(watch.recurring[0].bytes_delta, 28 * MB);
+        assert_eq!(watch.recurring[0].bytes_delta, 56 * MB);
     }
 
     #[test]
