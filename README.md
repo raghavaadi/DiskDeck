@@ -19,7 +19,13 @@ compiler proves there are no data races.
   frame — you watch the disk materialize instead of waiting for a completed
   scan.
 - **DaisyDisk-style zoom** — drilling into a region animates it expanding to
-  fill the view. Right-click or Esc to go back up.
+  fill the view. A visible Back button and clickable breadcrumbs make the
+  route home obvious.
+- **Native light and dark appearances** — DiskDeck follows the macOS system
+  appearance automatically while preserving the same hierarchy and safety
+  meaning in both modes.
+- **Discoverable map actions** — right-click a real map item for Open, Reveal
+  in Finder, and Move to SSD instead of memorizing modifier-key shortcuts.
 - **Verified SSD offload** — move a home-folder item to an external drive,
   verify the copy, then optionally leave a symlink at the original path.
 - One self-contained native binary; no webview runtime, no bindings layer.
@@ -107,12 +113,14 @@ point) but are never suggested for deletion.
 
 | Gesture | Action |
 |---|---|
-| click region | drill in (animated zoom) |
-| right-click / Esc | back up one level |
-| ⌥-click region | reveal in Finder |
-| ⌘-click region | prepare a verified move to an external drive |
+| click folder region | open it with an animated zoom |
+| right-click region | open the actions menu: Open, Reveal in Finder, Move to SSD… |
+| click Back | return to the previous folder; disabled at the Data root |
+| click a breadcrumb | jump directly to that ancestor |
+| press Esc | close an open actions menu; otherwise return one folder |
 | click rec title | expand explainer |
 | click action chip | toggle → TRASH / ERASE |
+| click Review targets | inspect the reclaim plan before acting |
 | hold reclaim button 0.9 s | execute the plan |
 
 ## Build from source
@@ -189,5 +197,4 @@ adaptive icon into the app's `Assets.car`.
 
 ## License
 
-DiskDeck is dual-licensed under your choice of the
-[MIT license](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE).
+DiskDeck is open source under the [Apache License 2.0](LICENSE).

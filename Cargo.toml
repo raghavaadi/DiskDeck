@@ -3,7 +3,7 @@ name = "diskdeck"
 version = "1.0.0"
 edition = "2021"
 description = "A native macOS disk-space visualizer and safe reclaimer"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 repository = "https://github.com/raghavaadi/DiskDeck"
 
 [dependencies]
