@@ -20,6 +20,9 @@ compiler proves there are no data races.
   scan.
 - **See what grew** — completed scans keep a compact local baseline and show
   the total change plus the largest ≥10 MB growers on the next scan.
+- **Growth Watch** — inspect a 12-scan total-storage timeline, recurring
+  growers, and folder watchlist with absolute and percentage change. It reads
+  local snapshots only and never starts an always-on background scan.
 - **DaisyDisk-style zoom** — drilling into a region animates it expanding to
   fill the view. A visible Back button and clickable breadcrumbs make the
   route home obvious.
@@ -54,6 +57,9 @@ Safety is structural, not advisory:
 - move history stays local under DiskDeck's Application Support directory;
   raw macOS path bytes round-trip losslessly and corrupt records are never
   overwritten
+- Growth Watch choices use a separate bounded, lossless local file; they
+  update only when you pin/unpin a measured folder, and measurements advance
+  only after a completed scan
 - scan history stays local under DiskDeck's Application Support directory;
   only the 12 newest compact completed-scan snapshots are retained
 
@@ -141,6 +147,8 @@ point) but are never suggested for deletion.
 | click action chip | toggle → TRASH / ERASE |
 | click Review targets | inspect the reclaim plan before acting |
 | click Moved items | inspect offloaded items and their restore readiness |
+| click Growth Watch | inspect retained scan trends and recurring growers |
+| click Watch / Unwatch | update the local folder watchlist |
 | click Restore to Mac… | review why an item can or cannot be restored |
 | hold restore button 0.9 s | restore one acknowledged, preflighted item |
 | hold reclaim button 0.9 s | execute the plan |
@@ -178,7 +186,7 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 | `scan.rs` | counts & aggregation, post-scan compaction folds small dirs, hardlinks counted once, denied dirs counted but non-fatal, nested `node_modules` not double-reported |
 | `rules.rs` | KB doctrine on a synthetic tree: tiers, Trash=empty-not-trash, ≥50 MB cache floor + skip-list, Library `node_modules` excluded, safe-before-caution ordering, every rec carries explainers, `~` path prettification |
 | `clean.rs` | quick_du, write-protected delete, empty-keeps-dir, output tailing, command timeout |
-| `history.rs` | lossless snapshot codec, corruption handling, compact-tree capture, comparison threshold/order, atomic retention without touching unrelated files |
+| `history.rs` | lossless snapshot/watchlist codecs, corruption handling, compact-tree capture, comparison threshold/order, recurring-growth timeline, atomic retention without touching unrelated files |
 | `transfer.rs` | shared collision, filesystem-identity, apparent-size, and verified-copy primitives |
 | `offload.rs` | protected-path policy, worker revalidation, destination collision, source identity, capacity margin, verified moves, symlink behavior, local move-record persistence, event ordering |
 | `moves.rs` | lossless registry codec, atomic bounded storage, legacy-ledger import, health classification, restore preflight, rollback, and worker events |

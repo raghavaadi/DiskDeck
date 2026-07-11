@@ -4,7 +4,10 @@
 use crate::clean::{
     fmt_bytes, fmt_count, open_full_disk_access, reveal_in_finder, run_clean, CleanEvent, CleanJob,
 };
-use crate::history::{default_history_dir, record_scan, GrowthSummary, HistoryEvent};
+use crate::history::{
+    default_history_dir, load_growth_watch, record_scan, set_folder_watched, GrowthSummary,
+    GrowthWatch, HistoryEvent, TimelinePoint,
+};
 use crate::moves::{
     can_confirm_restore, refresh_records, registry_path_for_home, restore_block, run_restore,
     state_reason, MoveState, MovedItem, RestoreBlock, RestoreEvent, RestoreJob, RestoreRoots,
@@ -78,12 +81,13 @@ enum RailView {
     Summary,
     Reclaim,
     Moved,
+    Growth,
 }
 
 fn rail_back_target(view: RailView) -> Option<RailView> {
     match view {
         RailView::Summary => None,
-        RailView::Reclaim | RailView::Moved => Some(RailView::Summary),
+        RailView::Reclaim | RailView::Moved | RailView::Growth => Some(RailView::Summary),
     }
 }
 
@@ -124,6 +128,9 @@ pub struct App {
     restoring: bool,
     restore_dialog: Option<RestoreDialog>,
     restore_hold: f32,
+    growth_watch_rx: Option<Receiver<Result<GrowthWatch, String>>>,
+    growth_watch: GrowthWatch,
+    growth_watch_error: Option<String>,
 }
 
 fn now_hms() -> String {
@@ -163,6 +170,73 @@ fn fmt_delta(bytes: i64) -> String {
     }
 }
 
+fn fmt_percent_tenths(value: Option<i64>) -> String {
+    match value {
+        Some(value) => format!("{:+.1}%", value as f64 / 10.0),
+        None => "new".into(),
+    }
+}
+
+fn draw_growth_sparkline(ui: &egui::Ui, rect: Rect, points: &[TimelinePoint]) {
+    let palette = theme::palette(ui.ctx());
+    ui.painter()
+        .rect_filled(rect, Rounding::same(8.0), palette.surface);
+    ui.painter().rect_stroke(
+        rect,
+        Rounding::same(8.0),
+        Stroke::new(1.0, palette.edge_soft),
+    );
+    if points.is_empty() {
+        return;
+    }
+    let plot = Rect::from_min_max(rect.min + vec2(9.0, 9.0), rect.max - vec2(9.0, 22.0));
+    let min = points
+        .iter()
+        .map(|point| point.total_bytes)
+        .min()
+        .unwrap_or(0);
+    let max = points
+        .iter()
+        .map(|point| point.total_bytes)
+        .max()
+        .unwrap_or(min);
+    let span = (max - min).max(1) as f32;
+    let denom = points.len().saturating_sub(1).max(1) as f32;
+    let line: Vec<Pos2> = points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| {
+            pos2(
+                egui::lerp(plot.x_range(), index as f32 / denom),
+                plot.max.y - (point.total_bytes - min) as f32 / span * plot.height(),
+            )
+        })
+        .collect();
+    if line.len() > 1 {
+        ui.painter().add(egui::Shape::line(
+            line.clone(),
+            Stroke::new(2.0, palette.accent),
+        ));
+    }
+    for point in line {
+        ui.painter().circle_filled(point, 2.5, palette.accent);
+    }
+    ui.painter().text(
+        rect.min + vec2(9.0, rect.height() - 8.0),
+        Align2::LEFT_CENTER,
+        format!("oldest {}", fmt_bytes(points[0].total_bytes)),
+        theme::mono(8.5),
+        palette.faint,
+    );
+    ui.painter().text(
+        rect.max - vec2(9.0, 8.0),
+        Align2::RIGHT_CENTER,
+        format!("latest {}", fmt_bytes(points.last().unwrap().total_bytes)),
+        theme::mono(8.5),
+        palette.muted,
+    );
+}
+
 impl App {
     pub fn new() -> Self {
         App {
@@ -200,6 +274,9 @@ impl App {
             restoring: false,
             restore_dialog: None,
             restore_hold: 0.0,
+            growth_watch_rx: None,
+            growth_watch: GrowthWatch::default(),
+            growth_watch_error: None,
         }
     }
 
@@ -322,6 +399,7 @@ impl App {
                     OpsKind::Dim,
                     "scan baseline saved — future scans will show what grew",
                 );
+                self.begin_growth_refresh();
             }
             HistoryEvent::Compared(summary) => {
                 self.history_baseline = false;
@@ -341,6 +419,7 @@ impl App {
                     ),
                 );
                 self.regrowth = Some(summary);
+                self.begin_growth_refresh();
             }
             HistoryEvent::Failed(error) => {
                 self.history_baseline = false;
@@ -348,6 +427,81 @@ impl App {
                 self.ops(
                     OpsKind::Amber,
                     format!("scan history unavailable — {error}"),
+                );
+            }
+        }
+    }
+
+    fn begin_growth_refresh(&mut self) {
+        if self.growth_watch_rx.is_some() {
+            return;
+        }
+        let Some(dir) = default_history_dir() else {
+            self.growth_watch_error = Some("Home folder is unavailable".into());
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("growth-watch".into())
+            .spawn(move || {
+                let result = load_growth_watch(&dir, Path::new(DATA_ROOT));
+                let _ = tx.send(result);
+            }) {
+            Ok(_) => {
+                self.growth_watch_rx = Some(rx);
+                self.growth_watch_error = None;
+            }
+            Err(error) => {
+                self.growth_watch_error = Some(format!("start Growth Watch: {error}"));
+            }
+        }
+    }
+
+    fn set_growth_folder(&mut self, folder: std::path::PathBuf, watched: bool) {
+        if self.growth_watch_rx.is_some() {
+            return;
+        }
+        let Some(dir) = default_history_dir() else {
+            self.growth_watch_error = Some("Home folder is unavailable".into());
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("growth-watch-update".into())
+            .spawn(move || {
+                let result = set_folder_watched(&dir, &folder, watched)
+                    .and_then(|_| load_growth_watch(&dir, Path::new(DATA_ROOT)));
+                let _ = tx.send(result);
+            }) {
+            Ok(_) => {
+                self.growth_watch_rx = Some(rx);
+                self.growth_watch_error = None;
+            }
+            Err(error) => {
+                self.growth_watch_error = Some(format!("update Growth Watch: {error}"));
+            }
+        }
+    }
+
+    fn poll_growth_watch(&mut self) {
+        let result = match self.growth_watch_rx.as_ref().map(Receiver::try_recv) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Some(Err("Growth Watch worker stopped before reporting".into()))
+            }
+        };
+        self.growth_watch_rx = None;
+        match result.unwrap() {
+            Ok(watch) => {
+                self.growth_watch = watch;
+                self.growth_watch_error = None;
+            }
+            Err(error) => {
+                self.growth_watch_error = Some(error.clone());
+                self.ops(
+                    OpsKind::Amber,
+                    format!("Growth Watch unavailable — {error}"),
                 );
             }
         }
@@ -789,6 +943,7 @@ mod tests {
         assert_eq!(rail_back_target(RailView::Summary), None);
         assert_eq!(rail_back_target(RailView::Reclaim), Some(RailView::Summary));
         assert_eq!(rail_back_target(RailView::Moved), Some(RailView::Summary));
+        assert_eq!(rail_back_target(RailView::Growth), Some(RailView::Summary));
     }
 
     #[test]
@@ -1074,6 +1229,7 @@ impl eframe::App for App {
             self.booted = true;
             self.begin_scan();
             self.begin_move_refresh();
+            self.begin_growth_refresh();
         }
         if self.scan_done() && !self.recs_built {
             self.on_scan_finished();
@@ -1083,6 +1239,7 @@ impl eframe::App for App {
         self.poll_history();
         self.poll_moves();
         self.poll_restore();
+        self.poll_growth_watch();
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             if self.restore_dialog.take().is_some() {
                 self.restore_hold = 0.0;
@@ -1106,6 +1263,7 @@ impl eframe::App for App {
             || self.moves_rx.is_some()
             || self.restoring
             || self.restore_dialog.is_some()
+            || self.growth_watch_rx.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(40));
         }
@@ -1778,6 +1936,10 @@ impl App {
                 self.draw_moved_items(ui, rect);
                 return;
             }
+            RailView::Growth => {
+                self.draw_growth_watch(ui, rect);
+                return;
+            }
             RailView::Reclaim => {}
         }
 
@@ -1996,6 +2158,29 @@ impl App {
             {
                 self.rail_view = RailView::Moved;
                 self.begin_move_refresh();
+            }
+        });
+        let growth_rect = Rect::from_min_size(
+            pos2(rect.min.x, moved_rect.max.y + 8.0),
+            vec2(rect.width(), 34.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(growth_rect), |ui| {
+            let snapshots = self.growth_watch.timeline.len();
+            let button = egui::Button::new(
+                RichText::new("Growth Watch")
+                    .font(theme::display_md(10.5))
+                    .color(palette.accent),
+            )
+            .fill(palette.surface)
+            .stroke(Stroke::new(1.0, palette.edge_soft))
+            .rounding(Rounding::same(8.0));
+            if ui
+                .add_sized(ui.available_size(), button)
+                .on_hover_text(format!("Review {snapshots} retained scan snapshot(s)"))
+                .clicked()
+            {
+                self.rail_view = RailView::Growth;
+                self.begin_growth_refresh();
             }
         });
 
@@ -2234,6 +2419,242 @@ impl App {
                 block,
             });
             self.restore_hold = 0.0;
+        }
+    }
+
+    fn draw_growth_watch(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let meta = format!(
+            "{} snapshots · local only",
+            self.growth_watch.timeline.len()
+        );
+        let content = panel_chrome(ui, rect, "Growth Watch", Some((meta, palette.faint)));
+        let nav = Rect::from_min_size(
+            content.min + vec2(10.0, 4.0),
+            vec2(content.width() - 20.0, 30.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(nav), |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("← Reclaim summary")
+                                .font(theme::display_md(10.5))
+                                .color(palette.accent),
+                        )
+                        .frame(false),
+                    )
+                    .clicked()
+                {
+                    self.rail_view = RailView::Summary;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            self.growth_watch_rx.is_none(),
+                            egui::Button::new(
+                                RichText::new(if self.growth_watch_rx.is_some() {
+                                    "Refreshing…"
+                                } else {
+                                    "Refresh"
+                                })
+                                .font(theme::mono(9.5)),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.begin_growth_refresh();
+                    }
+                });
+            });
+        });
+
+        let list = Rect::from_min_max(
+            pos2(content.min.x + 10.0, nav.max.y + 4.0),
+            pos2(content.max.x - 10.0, content.max.y - 4.0),
+        );
+        let mut watch_change: Option<(std::path::PathBuf, bool)> = None;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list), |ui| {
+            if let Some(error) = &self.growth_watch_error {
+                ui.label(
+                    RichText::new(format!("Growth Watch unavailable\n{error}"))
+                        .font(theme::body(10.5))
+                        .color(palette.danger),
+                );
+                return;
+            }
+            if self.growth_watch_rx.is_some() && self.growth_watch.timeline.is_empty() {
+                ui.label(
+                    RichText::new("Reading local scan history…")
+                        .font(theme::body(10.5))
+                        .color(palette.muted),
+                );
+                return;
+            }
+            if self.growth_watch.timeline.is_empty() {
+                ui.label(
+                    RichText::new("Complete a scan to create the first local baseline.")
+                        .font(theme::body(10.5))
+                        .color(palette.muted),
+                );
+                return;
+            }
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("TOTAL STORAGE TREND")
+                            .font(theme::display_md(9.5))
+                            .color(palette.muted),
+                    );
+                    let (chart, _) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), 76.0), Sense::hover());
+                    draw_growth_sparkline(ui, chart, &self.growth_watch.timeline);
+                    ui.add_space(8.0);
+
+                    if self.growth_watch.timeline.len() == 1 {
+                        ui.label(
+                            RichText::new(
+                                "Baseline saved. Complete another normal scan to compare growth.",
+                            )
+                            .font(theme::body(9.5))
+                            .color(palette.faint),
+                        );
+                    }
+
+                    if !self.growth_watch.watched.is_empty() {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("WATCHED FOLDERS")
+                                .font(theme::display_md(9.5))
+                                .color(palette.accent),
+                        );
+                        for series in &self.growth_watch.watched {
+                            Frame::none()
+                                .fill(palette.surface)
+                                .stroke(Stroke::new(1.0, palette.edge_soft))
+                                .rounding(Rounding::same(8.0))
+                                .inner_margin(Margin::symmetric(9.0, 7.0))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                RichText::new(tail_str(
+                                                    &series.path.display().to_string(),
+                                                    30,
+                                                ))
+                                                .font(theme::display_md(10.5))
+                                                .color(palette.ink),
+                                            );
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "{} · {}",
+                                                    fmt_delta(series.bytes_delta),
+                                                    fmt_percent_tenths(series.percent_tenths)
+                                                ))
+                                                .font(theme::mono(9.0))
+                                                .color(if series.bytes_delta > 0 {
+                                                    palette.caution
+                                                } else {
+                                                    palette.safe
+                                                }),
+                                            );
+                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .add_enabled(
+                                                        self.growth_watch_rx.is_none(),
+                                                        egui::Button::new(
+                                                            RichText::new("Unwatch")
+                                                                .font(theme::mono(9.0)),
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    watch_change =
+                                                        Some((series.path.clone(), false));
+                                                }
+                                            },
+                                        );
+                                    });
+                                });
+                            ui.add_space(5.0);
+                        }
+                    }
+
+                    if !self.growth_watch.recurring.is_empty() {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("RECURRING GROWERS")
+                                .font(theme::display_md(9.5))
+                                .color(palette.caution),
+                        );
+                        for growth in &self.growth_watch.recurring {
+                            Frame::none()
+                                .fill(palette.surface)
+                                .stroke(Stroke::new(1.0, palette.edge_soft))
+                                .rounding(Rounding::same(8.0))
+                                .inner_margin(Margin::symmetric(9.0, 7.0))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                RichText::new(tail_str(
+                                                    &growth.path.display().to_string(),
+                                                    28,
+                                                ))
+                                                .font(theme::display_md(10.5))
+                                                .color(palette.ink),
+                                            );
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "grew {} across {} scan interval(s) · {}",
+                                                    fmt_bytes(growth.bytes_delta),
+                                                    growth.positive_intervals,
+                                                    fmt_percent_tenths(growth.percent_tenths)
+                                                ))
+                                                .font(theme::mono(8.5))
+                                                .color(palette.muted),
+                                            );
+                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let label = if growth.watched {
+                                                    "Watching"
+                                                } else {
+                                                    "Watch"
+                                                };
+                                                if ui
+                                                    .add_enabled(
+                                                        !growth.watched
+                                                            && self.growth_watch_rx.is_none(),
+                                                        egui::Button::new(
+                                                            RichText::new(label)
+                                                                .font(theme::mono(9.0)),
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    watch_change =
+                                                        Some((growth.path.clone(), true));
+                                                }
+                                            },
+                                        );
+                                    });
+                                });
+                            ui.add_space(5.0);
+                        }
+                    }
+                });
+        });
+        if let Some((path, watched)) = watch_change {
+            self.set_growth_folder(path, watched);
         }
     }
 
