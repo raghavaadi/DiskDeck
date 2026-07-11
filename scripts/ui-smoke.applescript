@@ -100,6 +100,13 @@ on run argv
                 return my largestTileCenter(appGroup)
             else if commandName is "menu-visible" then
                 return my menuIsVisible(appGroup)
+            else if commandName is "moved-items-visible" then
+                if not (exists button "Moved items" of appGroup) then error "Moved items control is unavailable." number 1
+                click button "Moved items" of appGroup
+                delay 0.5
+                if not (exists button "← Reclaim summary" of appGroup) then error "Moved items rail did not open." number 1
+                if not (exists button "Refresh" of appGroup) then error "Moved items Refresh control is unavailable." number 1
+                return "PASS: Moved items rail available"
             else if commandName is "escape" then
                 key code 53
                 return "PASS: Escape sent"
@@ -112,7 +119,7 @@ on run argv
                 if afterSignature is beforeSignature then error "Back did not change the breadcrumb." number 1
                 return "PASS: Back navigation"
             else
-                error "Usage: ui-smoke.applescript check|signature|tile-center|menu-visible|escape|back" number 1
+                error "Usage: ui-smoke.applescript check|signature|tile-center|menu-visible|moved-items-visible|escape|back" number 1
             end if
         end tell
     end tell

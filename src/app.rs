@@ -5,6 +5,10 @@ use crate::clean::{
     fmt_bytes, fmt_count, open_full_disk_access, reveal_in_finder, run_clean, CleanEvent, CleanJob,
 };
 use crate::history::{default_history_dir, record_scan, GrowthSummary, HistoryEvent};
+use crate::moves::{
+    can_confirm_restore, refresh_records, registry_path_for_home, restore_block, run_restore,
+    state_reason, MoveState, MovedItem, RestoreBlock, RestoreEvent, RestoreJob, RestoreRoots,
+};
 use crate::offload::{
     can_confirm_offload, check_movable, classify_movable, external_volumes, has_room, run_offload,
     OffloadEvent, OffloadJob, Volume,
@@ -69,6 +73,26 @@ struct OffloadDialog {
     reason: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RailView {
+    Summary,
+    Reclaim,
+    Moved,
+}
+
+fn rail_back_target(view: RailView) -> Option<RailView> {
+    match view {
+        RailView::Summary => None,
+        RailView::Reclaim | RailView::Moved => Some(RailView::Summary),
+    }
+}
+
+struct RestoreDialog {
+    item: MovedItem,
+    acknowledged: bool,
+    block: Option<RestoreBlock>,
+}
+
 pub struct App {
     scan: Option<ScanHandle>,
     view: Option<Arc<Node>>,
@@ -88,11 +112,18 @@ pub struct App {
     offloading: bool,
     dialog: Option<OffloadDialog>,
     dialog_hold: f32,
-    review_open: bool,
+    rail_view: RailView,
     activity_open: bool,
     history_rx: Option<Receiver<HistoryEvent>>,
     regrowth: Option<GrowthSummary>,
     history_baseline: bool,
+    moves_rx: Option<Receiver<Result<Vec<MovedItem>, String>>>,
+    moved_items: Vec<MovedItem>,
+    moves_error: Option<String>,
+    restore_rx: Option<Receiver<RestoreEvent>>,
+    restoring: bool,
+    restore_dialog: Option<RestoreDialog>,
+    restore_hold: f32,
 }
 
 fn now_hms() -> String {
@@ -157,11 +188,18 @@ impl App {
             offloading: false,
             dialog: None,
             dialog_hold: 0.0,
-            review_open: false,
+            rail_view: RailView::Summary,
             activity_open: false,
             history_rx: None,
             regrowth: None,
             history_baseline: false,
+            moves_rx: None,
+            moved_items: Vec::new(),
+            moves_error: None,
+            restore_rx: None,
+            restoring: false,
+            restore_dialog: None,
+            restore_hold: 0.0,
         }
     }
 
@@ -443,11 +481,102 @@ impl App {
                         );
                     }
                     self.ops(OpsKind::Dim, "rescan to refresh the terrain map");
+                    self.begin_move_refresh();
                 }
                 OffloadEvent::Failed { error } => {
                     self.offloading = false;
                     self.offload_rx = None;
                     self.ops(OpsKind::Err, format!("✗ offload failed — {error}"));
+                }
+            }
+        }
+    }
+
+    fn home_dir() -> std::path::PathBuf {
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default()
+    }
+
+    fn begin_move_refresh(&mut self) {
+        if self.moves_rx.is_some() {
+            return;
+        }
+        let home = Self::home_dir();
+        let registry = registry_path_for_home(&home);
+        let (tx, rx) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("move-refresh".into())
+            .spawn(move || {
+                let result = refresh_records(&registry, &home, Path::new("/Volumes"));
+                let _ = tx.send(result);
+            }) {
+            Ok(_) => {
+                self.moves_rx = Some(rx);
+                self.moves_error = None;
+            }
+            Err(error) => {
+                self.moves_error = Some(format!("start moved-items refresh: {error}"));
+            }
+        }
+    }
+
+    fn poll_moves(&mut self) {
+        let result = match self.moves_rx.as_ref().map(Receiver::try_recv) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Some(Err("moved-items worker stopped before reporting".into()))
+            }
+        };
+        self.moves_rx = None;
+        match result.unwrap() {
+            Ok(items) => {
+                self.moved_items = items;
+                self.moves_error = None;
+            }
+            Err(error) => {
+                self.moves_error = Some(error.clone());
+                self.ops(OpsKind::Amber, format!("moved items unavailable — {error}"));
+            }
+        }
+    }
+
+    fn poll_restore(&mut self) {
+        let Some(rx) = &self.restore_rx else { return };
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        for event in events {
+            match event {
+                RestoreEvent::Started { name, total } => self.ops(
+                    OpsKind::Info,
+                    format!("restoring {name} — {}", fmt_bytes(total)),
+                ),
+                RestoreEvent::Done {
+                    restored,
+                    origin,
+                    warning,
+                } => {
+                    self.restoring = false;
+                    self.restore_rx = None;
+                    self.stats = disk_stats();
+                    self.stats_at = Instant::now();
+                    self.ops(
+                        OpsKind::Ok,
+                        format!("✓ restored {} to {}", fmt_bytes(restored), origin.display()),
+                    );
+                    if let Some(warning) = warning {
+                        self.ops(OpsKind::Amber, warning);
+                    }
+                    self.begin_move_refresh();
+                }
+                RestoreEvent::Failed { error } => {
+                    self.restoring = false;
+                    self.restore_rx = None;
+                    self.ops(OpsKind::Err, format!("✗ restore failed — {error}"));
+                    self.begin_move_refresh();
                 }
             }
         }
@@ -651,8 +780,15 @@ mod tests {
     #[test]
     fn adaptive_native_opens_on_summary_without_the_activity_drawer() {
         let app = App::new();
-        assert!(!app.review_open);
+        assert_eq!(app.rail_view, RailView::Summary);
         assert!(!app.activity_open);
+    }
+
+    #[test]
+    fn rail_back_returns_each_detail_view_to_summary() {
+        assert_eq!(rail_back_target(RailView::Summary), None);
+        assert_eq!(rail_back_target(RailView::Reclaim), Some(RailView::Summary));
+        assert_eq!(rail_back_target(RailView::Moved), Some(RailView::Summary));
     }
 
     #[test]
@@ -937,6 +1073,7 @@ impl eframe::App for App {
         if !self.booted {
             self.booted = true;
             self.begin_scan();
+            self.begin_move_refresh();
         }
         if self.scan_done() && !self.recs_built {
             self.on_scan_finished();
@@ -944,6 +1081,17 @@ impl eframe::App for App {
         self.poll_clean_events();
         self.poll_offload();
         self.poll_history();
+        self.poll_moves();
+        self.poll_restore();
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            if self.restore_dialog.take().is_some() {
+                self.restore_hold = 0.0;
+            } else if self.dialog.is_none() {
+                if let Some(target) = rail_back_target(self.rail_view) {
+                    self.rail_view = target;
+                }
+            }
+        }
         if self.stats_at.elapsed() > Duration::from_secs(5) {
             self.stats = disk_stats();
             self.stats_at = Instant::now();
@@ -955,6 +1103,9 @@ impl eframe::App for App {
             || self.offloading
             || self.dialog.is_some()
             || self.history_rx.is_some()
+            || self.moves_rx.is_some()
+            || self.restoring
+            || self.restore_dialog.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(40));
         }
@@ -965,6 +1116,7 @@ impl eframe::App for App {
         }
         self.central(ctx);
         self.offload_dialog(ctx);
+        self.restore_dialog(ctx);
         self.stamp_overlay(ctx);
     }
 }
@@ -1617,9 +1769,16 @@ impl App {
     }
 
     fn draw_recs(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        if !self.review_open {
-            self.draw_reclaim_summary(ui, rect);
-            return;
+        match self.rail_view {
+            RailView::Summary => {
+                self.draw_reclaim_summary(ui, rect);
+                return;
+            }
+            RailView::Moved => {
+                self.draw_moved_items(ui, rect);
+                return;
+            }
+            RailView::Reclaim => {}
         }
 
         let palette = theme::palette(ui.ctx());
@@ -1653,7 +1812,7 @@ impl App {
                 )
                 .clicked()
             {
-                self.review_open = false;
+                self.rail_view = RailView::Summary;
             }
         });
 
@@ -1809,8 +1968,36 @@ impl App {
             palette.caution,
         );
         if (safe_response.clicked() || caution_response.clicked()) && self.recs_built {
-            self.review_open = true;
+            self.rail_view = RailView::Reclaim;
         }
+
+        let moved_rect = Rect::from_min_size(
+            pos2(rect.min.x, caution_rect.max.y + 10.0),
+            vec2(rect.width(), 34.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(moved_rect), |ui| {
+            let count = self
+                .moved_items
+                .iter()
+                .filter(|item| item.state != MoveState::Restored)
+                .count();
+            let button = egui::Button::new(
+                RichText::new("Moved items")
+                    .font(theme::display_md(10.5))
+                    .color(palette.accent),
+            )
+            .fill(palette.surface)
+            .stroke(Stroke::new(1.0, palette.edge_soft))
+            .rounding(Rounding::same(8.0));
+            if ui
+                .add_sized(ui.available_size(), button)
+                .on_hover_text(format!("Review {count} item(s) currently stored away"))
+                .clicked()
+            {
+                self.rail_view = RailView::Moved;
+                self.begin_move_refresh();
+            }
+        });
 
         let footer = Rect::from_min_max(pos2(rect.min.x, rect.max.y - 112.0), rect.max);
         let footer_fill = if ui.visuals().dark_mode {
@@ -1869,7 +2056,184 @@ impl App {
             },
         );
         if enabled && response.clicked() {
-            self.review_open = true;
+            self.rail_view = RailView::Reclaim;
+        }
+    }
+
+    fn draw_moved_items(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let active = self
+            .moved_items
+            .iter()
+            .filter(|item| item.state != MoveState::Restored)
+            .count();
+        let meta = format!("{active} away · {} recorded", self.moved_items.len());
+        let content = panel_chrome(ui, rect, "Moved items", Some((meta, palette.faint)));
+        let nav = Rect::from_min_size(
+            content.min + vec2(10.0, 4.0),
+            vec2(content.width() - 20.0, 30.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(nav), |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("← Reclaim summary")
+                                .font(theme::display_md(10.5))
+                                .color(palette.accent),
+                        )
+                        .frame(false),
+                    )
+                    .clicked()
+                {
+                    self.rail_view = RailView::Summary;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            self.moves_rx.is_none(),
+                            egui::Button::new(
+                                RichText::new(if self.moves_rx.is_some() {
+                                    "Refreshing…"
+                                } else {
+                                    "Refresh"
+                                })
+                                .font(theme::mono(9.5)),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.begin_move_refresh();
+                    }
+                });
+            });
+        });
+
+        let list = Rect::from_min_max(
+            pos2(content.min.x + 10.0, nav.max.y + 4.0),
+            pos2(content.max.x - 10.0, content.max.y - 4.0),
+        );
+        let mut restore_index = None;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list), |ui| {
+            if let Some(error) = &self.moves_error {
+                ui.label(
+                    RichText::new(format!("Moved items unavailable\n{error}"))
+                        .font(theme::body(10.5))
+                        .color(palette.danger),
+                );
+                return;
+            }
+            if self.moves_rx.is_some() && self.moved_items.is_empty() {
+                ui.label(
+                    RichText::new("Checking local move records…")
+                        .font(theme::body(10.5))
+                        .color(palette.muted),
+                );
+                return;
+            }
+            if self.moved_items.is_empty() {
+                ui.label(
+                    RichText::new(
+                        "Nothing has been moved yet. Use Move to SSD from a target or the map; verified moves appear here.",
+                    )
+                    .font(theme::body(10.5))
+                    .color(palette.muted),
+                );
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for (index, item) in self.moved_items.iter().enumerate() {
+                        let state_color = match item.state {
+                            MoveState::Ready => palette.safe,
+                            MoveState::DriveDisconnected | MoveState::TargetMissing => {
+                                palette.caution
+                            }
+                            MoveState::OriginChanged => palette.danger,
+                            MoveState::Restored => palette.faint,
+                        };
+                        Frame::none()
+                            .fill(palette.surface)
+                            .stroke(Stroke::new(1.0, palette.edge_soft))
+                            .rounding(Rounding::same(9.0))
+                            .inner_margin(Margin::symmetric(10.0, 9.0))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                let name = item
+                                    .record
+                                    .origin
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "Moved item".into());
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(tail_str(&name, 28))
+                                            .font(theme::display_md(11.5))
+                                            .color(palette.ink),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                RichText::new(fmt_bytes(item.record.bytes))
+                                                    .font(theme::mono(10.0))
+                                                    .color(palette.muted),
+                                            );
+                                        },
+                                    );
+                                });
+                                ui.label(
+                                    RichText::new(tail_str(
+                                        &item.record.dest.display().to_string(),
+                                        42,
+                                    ))
+                                    .font(theme::mono(9.0))
+                                    .color(palette.faint),
+                                );
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(state_reason(item.state))
+                                            .font(theme::body(9.5))
+                                            .color(state_color),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let enabled = item.state == MoveState::Ready
+                                                && !self.restoring;
+                                            if ui
+                                                .add_enabled(
+                                                    enabled,
+                                                    egui::Button::new(
+                                                        RichText::new("Restore to Mac…")
+                                                            .font(theme::display_md(9.5)),
+                                                    ),
+                                                )
+                                                .on_disabled_hover_text(state_reason(item.state))
+                                                .clicked()
+                                            {
+                                                restore_index = Some(index);
+                                            }
+                                        },
+                                    );
+                                });
+                            });
+                        ui.add_space(6.0);
+                    }
+                });
+        });
+        if let Some(index) = restore_index {
+            let item = self.moved_items[index].clone();
+            let roots = RestoreRoots::production(Self::home_dir());
+            let block = restore_block(&item.record, &roots);
+            self.restore_dialog = Some(RestoreDialog {
+                item,
+                acknowledged: false,
+                block,
+            });
+            self.restore_hold = 0.0;
         }
     }
 
@@ -2351,6 +2715,139 @@ impl App {
             // dialog closes (not restored)
         } else if keep_open {
             self.dialog = Some(dlg);
+        }
+    }
+
+    fn restore_dialog(&mut self, ctx: &Context) {
+        let palette = theme::palette(ctx);
+        let Some(mut dialog) = self.restore_dialog.take() else {
+            return;
+        };
+        let mut keep_open = true;
+        let mut launch = false;
+
+        egui::Window::new(RichText::new("Restore to Mac").font(theme::body(13.0)))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_width(460.0);
+                ui.label(
+                    RichText::new(tail_str(
+                        &dialog.item.record.origin.display().to_string(),
+                        68,
+                    ))
+                    .font(theme::mono(10.5))
+                    .color(palette.ink),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "{} will be copied back to its original location.",
+                        fmt_bytes(dialog.item.record.bytes)
+                    ))
+                    .font(theme::body(10.5))
+                    .color(palette.muted),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "DiskDeck verifies the internal copy before removing the external copy. If cleanup cannot finish, both verified copies are kept and a warning is shown.",
+                    )
+                    .font(theme::body(10.0))
+                    .color(palette.muted),
+                );
+                ui.add_space(10.0);
+
+                if let Some(block) = dialog.block {
+                    ui.label(
+                        RichText::new(format!("✗ {}", block.message()))
+                            .font(theme::body(10.5))
+                            .color(palette.danger),
+                    );
+                } else {
+                    ui.checkbox(
+                        &mut dialog.acknowledged,
+                        "I understand the external copy is removed only after verification",
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let enabled = can_confirm_restore(dialog.acknowledged, dialog.block);
+                    let label = if dialog.block.is_some() {
+                        "Restore unavailable"
+                    } else if !dialog.acknowledged {
+                        "Confirm the acknowledgement"
+                    } else {
+                        "Hold to restore"
+                    };
+                    let (rect, response) =
+                        ui.allocate_exact_size(vec2(220.0, 30.0), Sense::click_and_drag());
+                    let base = if enabled { palette.safe } else { palette.edge };
+                    ui.painter().rect_stroke(
+                        rect,
+                        Rounding::same(8.0),
+                        Stroke::new(1.0, base),
+                    );
+                    if self.restore_hold > 0.0 {
+                        let fill = Rect::from_min_size(
+                            rect.min,
+                            vec2(rect.width() * self.restore_hold, rect.height()),
+                        );
+                        ui.painter().rect_filled(
+                            fill,
+                            Rounding::same(8.0),
+                            palette.safe_dim(34),
+                        );
+                    }
+                    ui.painter().text(
+                        rect.center(),
+                        Align2::CENTER_CENTER,
+                        label,
+                        theme::body(10.5),
+                        if enabled { palette.safe } else { palette.faint },
+                    );
+                    if enabled && response.is_pointer_button_down_on() {
+                        self.restore_hold += ui.input(|input| input.stable_dt).min(0.1) / HOLD_SECS;
+                        ui.ctx().request_repaint();
+                        if self.restore_hold >= 1.0 {
+                            self.restore_hold = 0.0;
+                            launch = true;
+                        }
+                    } else {
+                        self.restore_hold = 0.0;
+                    }
+                    if ui
+                        .button(RichText::new("Cancel").font(theme::mono(10.5)))
+                        .clicked()
+                    {
+                        keep_open = false;
+                    }
+                });
+            });
+
+        if launch {
+            let home = Self::home_dir();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let job = RestoreJob {
+                record: dialog.item.record.clone(),
+                registry_path: registry_path_for_home(&home),
+                roots: RestoreRoots::production(home),
+            };
+            match run_restore(job, tx) {
+                Ok(()) => {
+                    self.restore_rx = Some(rx);
+                    self.restoring = true;
+                    self.ops(
+                        OpsKind::Amber,
+                        format!("restore engaged — {}", dialog.item.record.origin.display()),
+                    );
+                }
+                Err(error) => {
+                    self.ops(OpsKind::Err, format!("✗ restore could not start — {error}"))
+                }
+            }
+        } else if keep_open {
+            self.restore_dialog = Some(dialog);
         }
     }
 

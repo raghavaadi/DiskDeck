@@ -44,4 +44,6 @@ after=$(ui signature)
 [ "$before" = "$after" ] || fail "Escape changed breadcrumb: $before -> $after"
 
 ui back
+ui moved-items-visible
+ui escape
 echo "signed UI smoke check passed"

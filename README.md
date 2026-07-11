@@ -32,6 +32,11 @@ compiler proves there are no data races.
   verify the copy, then optionally leave a symlink at the original path.
   Library data, hidden roots, cloud-sync folders, app/media bundles, and
   symlinked paths are refused in both the UI and background worker.
+- **Moved Items and verified restore** — every successful offload is recorded
+  locally, reconciled with attached drives, and classified before the Restore
+  button is enabled. Restore copies back to a staging path, verifies it,
+  installs it at the original location, rechecks the external item, and only
+  then removes the external copy.
 - One self-contained native binary; no webview runtime, no bindings layer.
 
 Safety is structural, not advisory:
@@ -43,6 +48,12 @@ Safety is structural, not advisory:
   Finder fallback only
 - SSD moves refuse an existing destination and recheck the original's
   filesystem identity immediately before removal
+- restores require an acknowledgement and 900 ms hold; an occupied origin,
+  disconnected drive, missing/replaced target, unsafe symlink, or insufficient
+  internal space blocks the operation before copying
+- move history stays local under DiskDeck's Application Support directory;
+  raw macOS path bytes round-trip losslessly and corrupt records are never
+  overwritten
 - scan history stays local under DiskDeck's Application Support directory;
   only the 12 newest compact completed-scan snapshots are retained
 
@@ -129,6 +140,9 @@ point) but are never suggested for deletion.
 | click rec title | expand explainer |
 | click action chip | toggle → TRASH / ERASE |
 | click Review targets | inspect the reclaim plan before acting |
+| click Moved items | inspect offloaded items and their restore readiness |
+| click Restore to Mac… | review why an item can or cannot be restored |
+| hold restore button 0.9 s | restore one acknowledged, preflighted item |
 | hold reclaim button 0.9 s | execute the plan |
 
 ## Build from source
@@ -165,7 +179,9 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 | `rules.rs` | KB doctrine on a synthetic tree: tiers, Trash=empty-not-trash, ≥50 MB cache floor + skip-list, Library `node_modules` excluded, safe-before-caution ordering, every rec carries explainers, `~` path prettification |
 | `clean.rs` | quick_du, write-protected delete, empty-keeps-dir, output tailing, command timeout |
 | `history.rs` | lossless snapshot codec, corruption handling, compact-tree capture, comparison threshold/order, atomic retention without touching unrelated files |
-| `offload.rs` | protected-path policy, worker revalidation, destination collision, source identity, capacity margin, verified moves, symlink behavior, event ordering |
+| `transfer.rs` | shared collision, filesystem-identity, apparent-size, and verified-copy primitives |
+| `offload.rs` | protected-path policy, worker revalidation, destination collision, source identity, capacity margin, verified moves, symlink behavior, local move-record persistence, event ordering |
+| `moves.rs` | lossless registry codec, atomic bounded storage, legacy-ledger import, health classification, restore preflight, rollback, and worker events |
 | `treemap.rs` | squarified layout conserves area, stays in bounds, degenerate inputs |
 
 ### Release checklist

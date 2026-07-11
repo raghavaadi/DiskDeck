@@ -9,9 +9,9 @@ use std::sync::mpsc::Sender;
 
 use crate::clean::{delete_path, quick_du};
 use crate::moves::{registry_path_for_home, upsert_record, MoveRecord};
-use crate::transfer::{
-    apparent_size, ensure_absent, ensure_same_identity, path_identity, verified_ditto_copy,
-};
+#[cfg(test)]
+use crate::transfer::apparent_size;
+use crate::transfer::{ensure_absent, ensure_same_identity, path_identity, verified_ditto_copy};
 
 /// An attached external volume eligible as an offload target.
 #[derive(Clone)]

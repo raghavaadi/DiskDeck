@@ -72,7 +72,9 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 | `rules.rs` | safety KB → `Vec<Rec>`; port of the proven Go doctrine | overlap control: caches with dedicated rules are in the `skip` list so generic `~/Library/Caches` enumeration doesn't double-report; recs carry data-volume paths — fs ops go through `strip_data_root` |
 | `clean.rs` | trash/delete/empty/command executors + background orchestrator (mpsc events) | **trash = `os::rename` into `~/.Trash` FIRST** — Finder-osascript hangs silently without the Automation TCC grant and is fallback only; `delete_path` chmods-and-retries for write-protected trees (go-modcache style) |
 | `history.rs` | compact completed-scan snapshots, binary codec, previous-scan comparison, atomic retention worker | raw path bytes must round-trip; corrupt snapshots are skipped; unrelated Application Support files are never pruned |
+| `transfer.rs` | shared path-identity, collision, apparent-size, and verified-ditto primitives | copy helpers never remove either side; callers own the final identity recheck and deletion order |
 | `offload.rs` | protected-path policy, external-volume checks, verified copy/move, ledger, worker events | UI eligibility is advisory; the worker must repeat full policy/target/capacity checks, and only a matching source identity may reach `delete_path` |
+| `moves.rs` | lossless local move registry, drive reconciliation, restore preflight and worker | restore is copy → verify → atomic install → target identity recheck → external delete; any occupied or changed path blocks before mutation |
 | `treemap.rs` | squarified layout + paint + zoom-from animation | caps at 40 rects + synthetic "smaller items" aggregate |
 | `app.rs` | egui panels, gauge, telemetry, rec cards, hold-button, ops feed | `request_repaint_after(40ms)` only while scanning/cleaning/animating — don't repaint unconditionally |
 | `theme.rs` | colors, fonts, `spaced()` | see the tofu gotcha below |
@@ -126,7 +128,8 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 - **Destructive-path testing:** only ever exercise the clean pipeline on the
   smallest safe-tier item with the `trash` action (recoverable), or on
   fixture dirs you created. Never test `delete`/`command` on the owner's
-  real data.
+  real data. Restore tests likewise use fixture roots only; signed UI smoke may
+  open Moved Items but must never click or hold Restore to Mac.
 
 ## Public repository and commit hygiene
 
@@ -147,7 +150,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 
 ## Repo conventions
 
-- Flat module layout (`scan/rules/clean/history/offload/treemap/theme/app`), one concern per
+- Flat module layout (`scan/rules/clean/history/transfer/offload/moves/treemap/theme/app`), one concern per
   file. No new crate dependencies without strong reason.
 - The approved aesthetic is **Adaptive Native**: a crisp, familiar macOS light
   appearance and a calm Storage Observatory dark appearance. The live storage
