@@ -138,6 +138,10 @@ with `DISKDECK_SIGN_IDENTITY`; the legacy `HEADROOM_SIGN_IDENTITY` override is
 also supported), installs to `/Applications/DiskDeck.app`, and packages
 `dist/DiskDeck.zip` with the recipient installer included.
 
+UI contributors can reproduce the maintainers' navigation and context-menu
+checks with the tracked, non-destructive AppleScript workflow documented in
+[CONTRIBUTING.md](CONTRIBUTING.md#signed-ui-smoke-check).
+
 ## Development & maintenance
 
 **Maintainers (human or AI): read [AGENTS.md](AGENTS.md) first.** It carries

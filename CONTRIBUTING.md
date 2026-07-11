@@ -33,6 +33,29 @@ For UI work, use the actual ship path and inspect the signed application in both
 ./make-app.sh
 ```
 
+### Signed UI smoke check
+
+DiskDeck includes the non-destructive Accessibility automation used by its
+maintainers. First validate that the tracked AppleScript, Swift helper, and
+shell runner compile:
+
+```sh
+scripts/test-ui-smoke.sh
+```
+
+For the live check, build and install the signed app with `./make-app.sh`, then
+grant Accessibility to the terminal or coding app launching the command in
+**System Settings → Privacy & Security → Accessibility**. Run:
+
+```sh
+scripts/test-signed-ui.sh
+```
+
+The live runner discovers the signed window, opens and dismisses a treemap
+context menu, verifies Escape does not change the breadcrumb, and may navigate
+one level with the named Back button. It never selects Open, Reveal in Finder,
+Move to SSD, Review targets, a recommendation, or the reclaim control.
+
 Do not share or commit the generated app, ZIP, `target`, `dist`, or AppleDouble `._*` files.
 
 ## Safety expectations
