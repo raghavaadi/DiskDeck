@@ -373,7 +373,9 @@ impl App {
         let home = std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .unwrap_or_default();
-        let reason = check_movable(&src, &home).err();
+        let reason = check_movable(&src, &home)
+            .err()
+            .map(|block| block.message().to_owned());
         self.dialog = Some(OffloadDialog {
             src,
             size,

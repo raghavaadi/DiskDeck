@@ -4,7 +4,7 @@
 
 use std::ffi::{CStr, CString};
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use crate::clean::{delete_path, quick_du};
@@ -30,14 +30,148 @@ pub fn dest_for(src: &Path, mount_path: &Path) -> PathBuf {
 /// Free-space margin required on the target beyond the item's own size.
 pub const MARGIN_BYTES: i64 = 100 * 1024 * 1024;
 
-/// A path is movable only if it lives inside the user's home directory and is
-/// not already on an external volume. Returns a human-readable reason on refusal.
-pub fn check_movable(src: &Path, home: &Path) -> Result<(), String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OffloadBlock {
+    NotAbsolute,
+    NotNormalized,
+    AlreadyExternal,
+    OutsideHome,
+    HomeRoot,
+    HiddenRoot,
+    ProtectedRoot,
+    CloudSyncRoot,
+    ManagedBundle,
+    Missing,
+    Symlink,
+    SymlinkAncestor,
+}
+
+impl OffloadBlock {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NotAbsolute => "Only absolute paths can be offloaded.",
+            Self::NotNormalized => "This path must be normalized before it can be offloaded.",
+            Self::AlreadyExternal => "This item is already on an external volume.",
+            Self::OutsideHome => "Only items inside your home folder can be offloaded.",
+            Self::HomeRoot => "Your entire home folder cannot be offloaded.",
+            Self::HiddenRoot => "Hidden home-folder data stays on this Mac.",
+            Self::ProtectedRoot => "App-managed home data stays on this Mac.",
+            Self::CloudSyncRoot => "Cloud-synced folders cannot be offloaded safely.",
+            Self::ManagedBundle => {
+                "Application and managed-library bundles cannot be offloaded safely."
+            }
+            Self::Missing => "This item is no longer available.",
+            Self::Symlink => "Symlinks cannot be offloaded.",
+            Self::SymlinkAncestor => "Items reached through a symlink cannot be offloaded.",
+        }
+    }
+}
+
+fn has_dot_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+}
+
+fn is_protected_root(name: &str) -> bool {
+    ["library", "applications", "public", "trash"]
+        .iter()
+        .any(|protected| name.eq_ignore_ascii_case(protected))
+}
+
+fn is_cloud_root(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        "dropbox",
+        "onedrive",
+        "google drive",
+        "icloud drive (archive",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+}
+
+fn is_managed_bundle(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        ".app",
+        ".photoslibrary",
+        ".musiclibrary",
+        ".imovielibrary",
+        ".fcpbundle",
+    ]
+    .iter()
+    .any(|suffix| lower.ends_with(suffix))
+}
+
+/// Pure, filesystem-independent policy for whether a path may be offloaded.
+pub fn classify_movable(src: &Path, home: &Path) -> Result<(), OffloadBlock> {
+    if !src.is_absolute() || !home.is_absolute() {
+        return Err(OffloadBlock::NotAbsolute);
+    }
+    if has_dot_component(src) || has_dot_component(home) {
+        return Err(OffloadBlock::NotNormalized);
+    }
     if src.starts_with("/Volumes") {
-        return Err("this item is already on an external volume".into());
+        return Err(OffloadBlock::AlreadyExternal);
     }
     if !src.starts_with(home) {
-        return Err("only items inside your home folder can be offloaded".into());
+        return Err(OffloadBlock::OutsideHome);
+    }
+
+    let relative = src
+        .strip_prefix(home)
+        .map_err(|_| OffloadBlock::OutsideHome)?;
+    if relative.as_os_str().is_empty() {
+        return Err(OffloadBlock::HomeRoot);
+    }
+
+    let first = relative
+        .components()
+        .find_map(|component| match component {
+            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .ok_or(OffloadBlock::HomeRoot)?;
+    if first.starts_with('.') {
+        return Err(OffloadBlock::HiddenRoot);
+    }
+    if is_protected_root(&first) {
+        return Err(OffloadBlock::ProtectedRoot);
+    }
+    if is_cloud_root(&first) {
+        return Err(OffloadBlock::CloudSyncRoot);
+    }
+
+    if relative.components().any(|component| match component {
+        Component::Normal(name) => is_managed_bundle(&name.to_string_lossy()),
+        _ => false,
+    }) {
+        return Err(OffloadBlock::ManagedBundle);
+    }
+    Ok(())
+}
+
+/// Full movable check. Filesystem-specific protection is added below the
+/// lexical policy so UI code can use `classify_movable` without per-frame I/O.
+pub fn check_movable(src: &Path, home: &Path) -> Result<(), OffloadBlock> {
+    classify_movable(src, home)?;
+    let relative = src
+        .strip_prefix(home)
+        .map_err(|_| OffloadBlock::OutsideHome)?;
+    let mut current = home.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(OffloadBlock::NotNormalized);
+        };
+        current.push(name);
+        let metadata = std::fs::symlink_metadata(&current).map_err(|_| OffloadBlock::Missing)?;
+        if metadata.file_type().is_symlink() {
+            return Err(if current == src {
+                OffloadBlock::Symlink
+            } else {
+                OffloadBlock::SymlinkAncestor
+            });
+        }
     }
     Ok(())
 }
@@ -308,22 +442,94 @@ mod tests {
     }
 
     #[test]
-    fn movable_accepts_home_paths() {
+    fn movable_policy_allows_normal_and_custom_home_folders() {
         let home = Path::new("/Users/<user>");
-        assert!(check_movable(Path::new("/Users/<user>/Movies/Big.mov"), home).is_ok());
+        assert_eq!(
+            classify_movable(Path::new("/Users/<user>/Movies/Big.mov"), home),
+            Ok(())
+        );
+        assert_eq!(
+            classify_movable(Path::new("/Users/<user>/Projects/DiskDeck"), home),
+            Ok(())
+        );
     }
 
     #[test]
-    fn movable_rejects_system_paths() {
+    fn movable_policy_blocks_protected_home_roots() {
         let home = Path::new("/Users/<user>");
-        assert!(check_movable(Path::new("/System/Library/Big"), home).is_err());
-        assert!(check_movable(Path::new("/usr/local/big"), home).is_err());
+        for path in [
+            "/Users/<user>",
+            "/Users/<user>/Library/Caches/App",
+            "/Users/<user>/.ssh",
+            "/Users/<user>/Applications/Tool.app",
+            "/Users/<user>/Public",
+            "/Users/<user>/.Trash/file",
+        ] {
+            assert!(classify_movable(Path::new(path), home).is_err(), "{path}");
+        }
     }
 
     #[test]
-    fn movable_rejects_already_external() {
+    fn movable_policy_blocks_cloud_roots_and_managed_bundles() {
         let home = Path::new("/Users/<user>");
-        assert!(check_movable(Path::new("/Volumes/<external>/thing"), home).is_err());
+        for path in [
+            "/Users/<user>/Dropbox/archive",
+            "/Users/<user>/OneDrive - Example/archive",
+            "/Users/<user>/Google Drive/archive",
+            "/Users/<user>/Pictures/Library.photoslibrary",
+            "/Users/<user>/Movies/Edit.fcpbundle",
+        ] {
+            assert!(classify_movable(Path::new(path), home).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn movable_policy_blocks_non_normalized_external_and_outside_paths() {
+        let home = Path::new("/Users/<user>");
+        assert_eq!(
+            classify_movable(Path::new("relative/file"), home),
+            Err(OffloadBlock::NotAbsolute)
+        );
+        assert_eq!(
+            classify_movable(Path::new("/Users/<user>/Movies/../Library"), home),
+            Err(OffloadBlock::NotNormalized)
+        );
+        assert_eq!(
+            classify_movable(Path::new("/Volumes/<external>/file"), home),
+            Err(OffloadBlock::AlreadyExternal)
+        );
+        assert_eq!(
+            classify_movable(Path::new("/System/Library/file"), home),
+            Err(OffloadBlock::OutsideHome)
+        );
+    }
+
+    #[test]
+    fn movable_filesystem_accepts_a_regular_home_file_and_rejects_a_source_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let regular = home.join("Movies/clip.mov");
+        let link = home.join("Movies/link.mov");
+        fs::create_dir_all(regular.parent().unwrap()).unwrap();
+        fs::write(&regular, b"clip").unwrap();
+        std::os::unix::fs::symlink(&regular, &link).unwrap();
+        assert_eq!(check_movable(&regular, &home), Ok(()));
+        assert_eq!(check_movable(&link, &home), Err(OffloadBlock::Symlink));
+    }
+
+    #[test]
+    fn movable_filesystem_rejects_a_symlinked_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let real = tmp.path().join("real");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("clip.mov"), b"clip").unwrap();
+        std::os::unix::fs::symlink(&real, home.join("Movies")).unwrap();
+        assert_eq!(
+            check_movable(&home.join("Movies/clip.mov"), &home),
+            Err(OffloadBlock::SymlinkAncestor)
+        );
     }
 
     #[test]
