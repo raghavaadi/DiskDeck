@@ -356,6 +356,14 @@ fn folder_capacity_detail(mapped_bytes: i64, files: i64) -> String {
     )
 }
 
+fn unavailable_source_copy(source: MapSource) -> &'static str {
+    match source {
+        MapSource::Folder => "Folder unavailable",
+        MapSource::External => "Disconnected",
+        MapSource::Internal => "Unavailable",
+    }
+}
+
 fn should_monitor_external_mount(rail_view: RailView, has_external_session: bool) -> bool {
     rail_view == RailView::External && has_external_session
 }
@@ -3510,6 +3518,15 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_source_copy_distinguishes_folder_from_drive_loss() {
+        assert_eq!(
+            unavailable_source_copy(MapSource::Folder),
+            "Folder unavailable"
+        );
+        assert_eq!(unavailable_source_copy(MapSource::External), "Disconnected");
+    }
+
+    #[test]
     fn auxiliary_scan_gate_allows_exactly_one_idle_read_only_session() {
         assert!(can_start_auxiliary_scan(
             false, false, false, false, false, false
@@ -4127,7 +4144,7 @@ impl App {
                         let label = if active_scanning {
                             "Stop scan"
                         } else if disconnected {
-                            "Disconnected"
+                            unavailable_source_copy(source)
                         } else if source != MapSource::Internal {
                             "Scan again"
                         } else if self.scan.is_some() {
@@ -4197,7 +4214,7 @@ impl App {
                         let status = if self.cleaning {
                             "Reclaiming"
                         } else if disconnected {
-                            "Disconnected"
+                            unavailable_source_copy(source)
                         } else if active_scanning {
                             "Scanning"
                         } else if active_done {
@@ -4312,7 +4329,7 @@ impl App {
             }
         };
         let (state_copy, state_color) = if disconnected {
-            ("Disconnected", palette.caution)
+            (unavailable_source_copy(source), palette.caution)
         } else if scanning {
             ("Scanning", palette.accent)
         } else if done {
