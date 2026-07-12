@@ -191,6 +191,7 @@ enum RailView {
     FileReview,
     ReclaimHistory,
     External,
+    Folder,
 }
 
 fn rail_back_target(view: RailView) -> Option<RailView> {
@@ -206,7 +207,8 @@ fn rail_back_target(view: RailView) -> Option<RailView> {
         | RailView::Monitor
         | RailView::FileReview
         | RailView::ReclaimHistory
-        | RailView::External => Some(RailView::Insights),
+        | RailView::External
+        | RailView::Folder => Some(RailView::Insights),
     }
 }
 
@@ -225,6 +227,7 @@ struct TrashRestoreDialog {
 enum MapSource {
     Internal,
     External,
+    Folder,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -236,7 +239,7 @@ impl MapCapabilities {
     const INTERNAL: Self = Self {
         allow_offload: true,
     };
-    const EXTERNAL: Self = Self {
+    const READ_ONLY: Self = Self {
         allow_offload: false,
     };
 }
@@ -331,12 +334,26 @@ fn external_scan_action(
     }
 }
 
-fn active_map_source(rail_view: RailView, has_external_session: bool) -> MapSource {
+fn active_map_source(
+    rail_view: RailView,
+    has_external_session: bool,
+    has_folder_session: bool,
+) -> MapSource {
     if rail_view == RailView::External && has_external_session {
         MapSource::External
+    } else if rail_view == RailView::Folder && has_folder_session {
+        MapSource::Folder
     } else {
         MapSource::Internal
     }
+}
+
+fn folder_capacity_detail(mapped_bytes: i64, files: i64) -> String {
+    format!(
+        "{} mapped in this folder · {} items",
+        fmt_bytes(mapped_bytes),
+        fmt_count(files)
+    )
 }
 
 fn should_monitor_external_mount(rail_view: RailView, has_external_session: bool) -> bool {
@@ -1262,7 +1279,11 @@ impl App {
             dialog.request_focus = true;
             return;
         }
-        let source = active_map_source(self.rail_view, self.external_session.is_some());
+        let source = active_map_source(
+            self.rail_view,
+            self.external_session.is_some(),
+            self.folder_session.is_some(),
+        );
         let (state, revision, connected) = match source {
             MapSource::Internal => (
                 self.scan.as_ref().map(ScanHandle::state),
@@ -1280,6 +1301,17 @@ impl App {
                     )
                 })
                 .unwrap_or((None, self.external_revision, false)),
+            MapSource::Folder => self
+                .folder_session
+                .as_ref()
+                .map(|session| {
+                    (
+                        Some(session.scan.state()),
+                        session.revision,
+                        !session.disconnected,
+                    )
+                })
+                .unwrap_or((None, self.folder_revision, false)),
         };
         if connected && can_open_storage_search(state, self.confirmation_dialog_open()) {
             self.search_dialog = Some(SearchDialog::new(source, revision));
@@ -1293,6 +1325,9 @@ impl App {
         let Some(crumbs) = crumbs_for(root, &node) else {
             return false;
         };
+        if source == MapSource::Folder && !self.folder_path_actions_available() {
+            return false;
+        }
         match source {
             MapSource::Internal => {
                 self.crumbs = crumbs;
@@ -1301,6 +1336,17 @@ impl App {
             }
             MapSource::External => {
                 let Some(session) = &mut self.external_session else {
+                    return false;
+                };
+                if session.disconnected {
+                    return false;
+                }
+                session.navigation.crumbs = crumbs;
+                session.navigation.view = Some(node);
+                session.navigation.zoom = None;
+            }
+            MapSource::Folder => {
+                let Some(session) = &mut self.folder_session else {
                     return false;
                 };
                 if session.disconnected {
@@ -2322,6 +2368,13 @@ impl App {
                     session.navigation.zoom = zoom;
                 }
             }
+            MapSource::Folder => {
+                if let Some(session) = &mut self.folder_session {
+                    session.navigation.view = view;
+                    session.navigation.crumbs = crumbs;
+                    session.navigation.zoom = zoom;
+                }
+            }
         }
     }
 
@@ -2349,6 +2402,10 @@ impl App {
             );
         }
         false
+    }
+
+    fn folder_path_actions_available(&mut self) -> bool {
+        self.refresh_folder_identity()
     }
 }
 
@@ -2814,17 +2871,40 @@ mod tests {
     }
 
     #[test]
+    fn folder_navigation_never_changes_internal_breadcrumbs() {
+        let root = storage_search_root();
+        let folder = storage_search_child(&root, "Project", true, false);
+        let tmp = tempfile::tempdir().unwrap();
+        let direct = tmp.path().canonicalize().unwrap();
+        let mut app = App::new();
+        app.folder_session = Some(FolderSession {
+            target: inspect_folder(&direct).unwrap(),
+            scan: start_scan(direct),
+            navigation: MapNavigation::default(),
+            revision: 1,
+            disconnected: false,
+            completion_reported: false,
+        });
+        assert!(app.open_search_folder(MapSource::Folder, &root, folder));
+        assert!(app.crumbs.is_empty());
+        assert_eq!(
+            app.folder_session.as_ref().unwrap().navigation.crumbs.len(),
+            1
+        );
+    }
+
+    #[test]
     fn external_map_selection_and_folder_navigation_stay_isolated() {
         assert_eq!(
-            active_map_source(RailView::External, true),
+            active_map_source(RailView::External, true, false),
             MapSource::External
         );
         assert_eq!(
-            active_map_source(RailView::External, false),
+            active_map_source(RailView::External, false, false),
             MapSource::Internal
         );
         assert_eq!(
-            active_map_source(RailView::Summary, true),
+            active_map_source(RailView::Summary, true, false),
             MapSource::Internal
         );
 
@@ -3343,9 +3423,22 @@ mod tests {
     #[test]
     fn external_volume_capabilities_never_allow_offload() {
         assert!(MapCapabilities::INTERNAL.allow_offload);
-        assert!(!MapCapabilities::EXTERNAL.allow_offload);
+        assert!(!MapCapabilities::READ_ONLY.allow_offload);
         assert_eq!(MapSource::Internal, MapSource::Internal);
         assert_ne!(MapSource::Internal, MapSource::External);
+    }
+
+    #[test]
+    fn folder_map_capabilities_are_read_only() {
+        assert!(!MapCapabilities::READ_ONLY.allow_offload);
+    }
+
+    #[test]
+    fn folder_capacity_copy_separates_volume_and_mapped_bytes() {
+        assert_eq!(
+            folder_capacity_detail(3_500_000_000, 42),
+            "3.5 GB mapped in this folder · 42 items"
+        );
     }
 
     #[test]
@@ -3809,6 +3902,9 @@ impl eframe::App for App {
             if self.rail_view == RailView::External && self.external_session.is_some() {
                 self.external_path_actions_available();
             }
+            if self.rail_view == RailView::Folder && self.folder_session.is_some() {
+                self.folder_path_actions_available();
+            }
         }
         self.update_menu_monitor();
         if self.scanning()
@@ -3818,6 +3914,10 @@ impl eframe::App for App {
             || self.zoom.is_some()
             || self
                 .external_session
+                .as_ref()
+                .is_some_and(|session| session.navigation.zoom.is_some())
+            || self
+                .folder_session
                 .as_ref()
                 .is_some_and(|session| session.navigation.zoom.is_some())
             || self.stamp.is_some()
@@ -3862,7 +3962,11 @@ impl eframe::App for App {
 impl App {
     fn top_bar(&mut self, ctx: &Context) {
         let palette = theme::palette(ctx);
-        let source = active_map_source(self.rail_view, self.external_session.is_some());
+        let source = active_map_source(
+            self.rail_view,
+            self.external_session.is_some(),
+            self.folder_session.is_some(),
+        );
         let (volume_label, active_scanning, active_done, disconnected, external_index) =
             match source {
                 MapSource::Internal => (
@@ -3885,6 +3989,16 @@ impl App {
                         self.external_volumes
                             .iter()
                             .position(|volume| is_same_mount(volume, &session.volume)),
+                    )
+                }
+                MapSource::Folder => {
+                    let session = self.folder_session.as_ref().expect("active folder session");
+                    (
+                        session.target.name.clone(),
+                        session.scan.state() == ScanState::Running,
+                        session.scan.state() == ScanState::Done,
+                        session.disconnected,
+                        None,
                     )
                 }
             };
@@ -3918,7 +4032,7 @@ impl App {
                     ui.label(
                         RichText::new(tail_str(&volume_label, 30))
                             .font(theme::body(11.5))
-                            .color(if source == MapSource::External {
+                            .color(if source != MapSource::Internal {
                                 palette.accent
                             } else {
                                 palette.faint
@@ -3930,7 +4044,7 @@ impl App {
                             "Stop scan"
                         } else if disconnected {
                             "Disconnected"
-                        } else if source == MapSource::External {
+                        } else if source != MapSource::Internal {
                             "Scan again"
                         } else if self.scan.is_some() {
                             "Rescan"
@@ -3940,8 +4054,8 @@ impl App {
                         let action_enabled = source == MapSource::Internal
                             || active_scanning
                             || (!disconnected
-                                && external_index.is_some()
-                                && external_can_start);
+                                && external_can_start
+                                && (source == MapSource::Folder || external_index.is_some()));
                         let clicked = ui
                             .add_enabled_ui(action_enabled, |ui| ghost_button(ui, label, true))
                             .inner
@@ -3964,6 +4078,21 @@ impl App {
                                 MapSource::External => {
                                     if let Some(index) = external_index {
                                         self.begin_external_scan(index);
+                                    }
+                                }
+                                MapSource::Folder if active_scanning => {
+                                    if let Some(session) = &self.folder_session {
+                                        session.scan.cancel.store(true, Relaxed);
+                                    }
+                                    self.ops(OpsKind::Amber, "folder scan stop requested");
+                                }
+                                MapSource::Folder => {
+                                    if let Some(path) = self
+                                        .folder_session
+                                        .as_ref()
+                                        .map(|session| session.target.path.clone())
+                                    {
+                                        self.begin_folder_scan(path);
                                     }
                                 }
                             }
@@ -4041,39 +4170,62 @@ impl App {
 
     fn draw_capacity(&self, ui: &egui::Ui, rect: Rect) {
         let palette = theme::palette(ui.ctx());
-        let external = (self.rail_view == RailView::External)
-            .then_some(self.external_session.as_ref())
-            .flatten();
-        let (title, stats, scanning, done, disconnected) = if let Some(session) = external {
-            let used = session
-                .volume
-                .total_bytes
-                .saturating_sub(session.volume.free_bytes);
-            let used_pct = if session.volume.total_bytes > 0 {
-                used as f64 / session.volume.total_bytes as f64 * 100.0
+        let source = active_map_source(
+            self.rail_view,
+            self.external_session.is_some(),
+            self.folder_session.is_some(),
+        );
+        let volume_stats = |total: i64, free: i64| {
+            let used = total.saturating_sub(free);
+            let used_pct = if total > 0 {
+                used as f64 / total as f64 * 100.0
             } else {
                 0.0
             };
-            (
-                format!("{} · storage used", session.volume.name),
-                DiskStats {
-                    total: session.volume.total_bytes,
-                    free: session.volume.free_bytes,
-                    used,
-                    used_pct,
-                },
-                session.scan.state() == ScanState::Running,
-                session.scan.state() == ScanState::Done,
-                session.disconnected,
-            )
-        } else {
-            (
+            DiskStats {
+                total,
+                free,
+                used,
+                used_pct,
+            }
+        };
+        let (title, stats, scanning, done, disconnected, detail) = match source {
+            MapSource::Internal => (
                 "Macintosh HD · storage used".into(),
                 self.stats,
                 self.scanning(),
                 self.scan_done(),
                 false,
-            )
+                None,
+            ),
+            MapSource::External => {
+                let session = self
+                    .external_session
+                    .as_ref()
+                    .expect("active external session");
+                (
+                    format!("{} · storage used", session.volume.name),
+                    volume_stats(session.volume.total_bytes, session.volume.free_bytes),
+                    session.scan.state() == ScanState::Running,
+                    session.scan.state() == ScanState::Done,
+                    session.disconnected,
+                    None,
+                )
+            }
+            MapSource::Folder => {
+                let session = self.folder_session.as_ref().expect("active folder session");
+                (
+                    format!("{} · containing volume", session.target.name),
+                    volume_stats(session.target.total_bytes, session.target.free_bytes),
+                    session.scan.state() == ScanState::Running,
+                    session.scan.state() == ScanState::Done,
+                    session.disconnected,
+                    Some(folder_capacity_detail(
+                        session.scan.root.bytes(),
+                        session.scan.root.files(),
+                    )),
+                )
+            }
         };
         let (state_copy, state_color) = if disconnected {
             ("Disconnected", palette.caution)
@@ -4128,7 +4280,7 @@ impl App {
             theme::body(11.0),
             palette.muted,
         );
-        let history = if external.is_some() {
+        let history = if source != MapSource::Internal {
             None
         } else if self.history_baseline {
             Some((
@@ -4162,6 +4314,14 @@ impl App {
                 text,
                 theme::body(10.5),
                 color,
+            );
+        } else if let Some(detail) = detail {
+            p.text(
+                content.min + vec2(16.0, 68.0),
+                Align2::LEFT_TOP,
+                detail,
+                theme::body(10.5),
+                palette.accent,
             );
         }
     }
@@ -4319,7 +4479,11 @@ impl App {
     fn draw_map(&mut self, ui: &mut egui::Ui, rect: Rect) {
         self.map_menu_open = false;
         let palette = theme::palette(ui.ctx());
-        let source = active_map_source(self.rail_view, self.external_session.is_some());
+        let source = active_map_source(
+            self.rail_view,
+            self.external_session.is_some(),
+            self.folder_session.is_some(),
+        );
         let (
             root,
             search_state,
@@ -4349,7 +4513,20 @@ impl App {
                     Some(session.scan.root.clone()),
                     Some(session.scan.state()),
                     session.volume.name.clone(),
-                    MapCapabilities::EXTERNAL,
+                    MapCapabilities::READ_ONLY,
+                    session.navigation.view.clone(),
+                    session.navigation.crumbs.clone(),
+                    session.navigation.zoom,
+                    session.disconnected,
+                )
+            }
+            MapSource::Folder => {
+                let session = self.folder_session.as_ref().expect("active folder session");
+                (
+                    Some(session.scan.root.clone()),
+                    Some(session.scan.state()),
+                    session.target.name.clone(),
+                    MapCapabilities::READ_ONLY,
                     session.navigation.view.clone(),
                     session.navigation.crumbs.clone(),
                     session.navigation.zoom,
@@ -4362,7 +4539,7 @@ impl App {
         let hint = root.as_ref().map(|root| {
             (
                 format!("{} items mapped", fmt_count(root.files())),
-                if source == MapSource::External {
+                if source != MapSource::Internal {
                     palette.accent
                 } else {
                     palette.faint
@@ -4489,7 +4666,11 @@ impl App {
             ui.painter().text(
                 map_rect.center(),
                 Align2::CENTER_CENTER,
-                "Drive disconnected\nRefresh drives and scan again",
+                if source == MapSource::Folder {
+                    "Folder unavailable\nChoose it again"
+                } else {
+                    "Drive disconnected\nRefresh drives and scan again"
+                },
                 theme::body(13.0),
                 palette.caution,
             );
@@ -4693,7 +4874,12 @@ impl App {
                 zoom_state = Some((source, Instant::now()));
             }
             Some(MapActionRequest::Reveal(path)) => {
-                if source == MapSource::Internal || self.external_path_actions_available() {
+                let path_actions_available = match source {
+                    MapSource::Internal => true,
+                    MapSource::External => self.external_path_actions_available(),
+                    MapSource::Folder => self.folder_path_actions_available(),
+                };
+                if path_actions_available {
                     reveal_in_finder(&path);
                 }
             }
@@ -4769,6 +4955,10 @@ impl App {
             }
             RailView::External => {
                 self.draw_external_drives(ui, rect);
+                return;
+            }
+            RailView::Folder => {
+                self.draw_folder_lens(ui, rect);
                 return;
             }
             RailView::Reclaim => {}
@@ -4878,6 +5068,21 @@ impl App {
             self.open_offload_dialog(path, size);
         }
         self.reclaim_footer(ui, footer_rect);
+    }
+
+    fn draw_folder_lens(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let content = panel_chrome(
+            ui,
+            rect,
+            "Folder Lens",
+            Some(("local · read-only".into(), palette.faint)),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content), |ui| {
+            if ui.button("← Insights").clicked() {
+                self.rail_view = RailView::Insights;
+            }
+        });
     }
 
     fn draw_reclaim_summary(&mut self, ui: &mut egui::Ui, rect: Rect) {
@@ -8136,6 +8341,12 @@ impl App {
                     && dialog.scan_revision == session.revision)
                     .then(|| session.scan.root.clone())
             }),
+            MapSource::Folder => self.folder_session.as_ref().and_then(|session| {
+                (session.scan.state() == ScanState::Done
+                    && !session.disconnected
+                    && dialog.scan_revision == session.revision)
+                    .then(|| session.scan.root.clone())
+            }),
         };
         let Some(root) = root else {
             return;
@@ -8422,11 +8633,15 @@ impl App {
         if !window_open || close_requested {
             return;
         }
-        if requested.is_some()
-            && dialog.source == MapSource::External
-            && !self.external_path_actions_available()
-        {
-            return;
+        if requested.is_some() {
+            let available = match dialog.source {
+                MapSource::Internal => true,
+                MapSource::External => self.external_path_actions_available(),
+                MapSource::Folder => self.folder_path_actions_available(),
+            };
+            if !available {
+                return;
+            }
         }
         match requested {
             Some((SearchAction::OpenMap, node)) => {
