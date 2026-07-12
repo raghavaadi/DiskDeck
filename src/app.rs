@@ -35,8 +35,9 @@ use crate::reclaim_plan::{
 use crate::rules::{self, strip_data_root, Action, Rec, Tier};
 use crate::scan::{disk_stats, start_scan, DiskStats, Node, ScanHandle, ScanState, DATA_ROOT};
 use crate::search::{
-    crumbs_for, largest_files, search_tree, LargestFilesSummary, SearchSummary,
-    DEFAULT_LARGEST_FILE_LIMIT, DEFAULT_RESULT_LIMIT,
+    crumbs_for, largest_files, scan_coverage, search_tree, CoverageKind, LargestFilesSummary,
+    ScanCoverageSummary, SearchSummary, DEFAULT_COVERAGE_LIMIT, DEFAULT_LARGEST_FILE_LIMIT,
+    DEFAULT_RESULT_LIMIT,
 };
 use crate::theme;
 use crate::treemap;
@@ -191,6 +192,7 @@ enum RailView {
     Apfs,
     Leftovers,
     Monitor,
+    ScanCoverage,
     LargestFiles,
     FileReview,
     ReclaimHistory,
@@ -209,6 +211,7 @@ fn rail_back_target(view: RailView) -> Option<RailView> {
         | RailView::Apfs
         | RailView::Leftovers
         | RailView::Monitor
+        | RailView::ScanCoverage
         | RailView::LargestFiles
         | RailView::FileReview
         | RailView::ReclaimHistory
@@ -408,6 +411,31 @@ enum LargestFileAction {
     Reveal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScanCoverageAction {
+    OpenFullDiskAccess,
+}
+
+impl ScanCoverageAction {
+    #[cfg(test)]
+    const ALL: [Self; 1] = [Self::OpenFullDiskAccess];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CoverageRowLayout {
+    path: Rect,
+    kind: Rect,
+}
+
+impl CoverageRowLayout {
+    fn from_rect(row: Rect) -> Self {
+        let kind_width = 72.0_f32.min(row.width());
+        let kind = Rect::from_min_max(pos2(row.max.x - kind_width, row.min.y), row.max);
+        let path = Rect::from_min_max(row.min, pos2((kind.min.x - 8.0).max(row.min.x), row.max.y));
+        Self { path, kind }
+    }
+}
+
 impl LargestFileAction {
     #[cfg(test)]
     const ALL: [Self; 2] = [Self::QuickLook, Self::Reveal];
@@ -499,6 +527,20 @@ fn largest_files_for_completed_map(
 }
 
 fn invalidate_largest_files(summary: &mut Option<LargestFilesSummary>) {
+    *summary = None;
+}
+
+fn scan_coverage_for_completed_map(
+    state: Option<ScanState>,
+    root: Option<&Arc<Node>>,
+) -> Option<ScanCoverageSummary> {
+    if state != Some(ScanState::Done) {
+        return None;
+    }
+    root.map(|root| scan_coverage(root, DEFAULT_COVERAGE_LIMIT))
+}
+
+fn invalidate_scan_coverage(summary: &mut Option<ScanCoverageSummary>) {
     *summary = None;
 }
 
@@ -601,6 +643,7 @@ pub struct App {
     file_review_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     file_review: Option<ReviewResult>,
     file_review_error: Option<String>,
+    scan_coverage: Option<ScanCoverageSummary>,
     largest_files: Option<LargestFilesSummary>,
     search_dialog: Option<SearchDialog>,
     map_menu_open: bool,
@@ -981,6 +1024,7 @@ impl App {
             file_review_cancel: None,
             file_review: None,
             file_review_error: None,
+            scan_coverage: None,
             largest_files: None,
             search_dialog: None,
             map_menu_open: false,
@@ -1014,6 +1058,7 @@ impl App {
             return;
         }
         invalidate_storage_search(&mut self.search_dialog);
+        invalidate_scan_coverage(&mut self.scan_coverage);
         invalidate_largest_files(&mut self.largest_files);
         self.recs_revision = self.recs_revision.wrapping_add(1);
         self.guide_revision = None;
@@ -2938,6 +2983,47 @@ mod tests {
     }
 
     #[test]
+    fn scan_coverage_opens_only_from_a_completed_internal_map() {
+        let root = storage_search_root();
+        let denied = storage_search_child(&root, "Private", true, true);
+
+        let summary = scan_coverage_for_completed_map(Some(ScanState::Done), Some(&root)).unwrap();
+        assert_eq!(summary.total_denied, 1);
+        assert_eq!(summary.results[0].path, denied.path);
+        assert!(scan_coverage_for_completed_map(None, Some(&root)).is_none());
+        assert!(scan_coverage_for_completed_map(Some(ScanState::Running), Some(&root)).is_none());
+        assert!(scan_coverage_for_completed_map(Some(ScanState::Aborted), Some(&root)).is_none());
+        assert!(scan_coverage_for_completed_map(Some(ScanState::Done), None).is_none());
+    }
+
+    #[test]
+    fn scan_coverage_projection_is_invalidated_before_root_replacement() {
+        let mut summary = Some(crate::search::ScanCoverageSummary::default());
+        invalidate_scan_coverage(&mut summary);
+        assert!(summary.is_none());
+    }
+
+    #[test]
+    fn scan_coverage_rows_keep_paths_clear_of_category_badges() {
+        for width in [276.0, 320.0, 420.0] {
+            let row = Rect::from_min_size(Pos2::ZERO, vec2(width, 36.0));
+            let layout = CoverageRowLayout::from_rect(row);
+            assert!(row.contains_rect(layout.path));
+            assert!(row.contains_rect(layout.kind));
+            assert!(layout.path.max.x <= layout.kind.min.x);
+            assert!(layout.kind.width() >= 64.0);
+        }
+    }
+
+    #[test]
+    fn scan_coverage_has_only_the_settings_action() {
+        assert_eq!(
+            ScanCoverageAction::ALL,
+            [ScanCoverageAction::OpenFullDiskAccess]
+        );
+    }
+
+    #[test]
     fn storage_search_escape_has_priority_over_every_navigation_layer() {
         assert_eq!(
             escape_target(true, true, true, false, Some(RailView::Insights)),
@@ -3470,6 +3556,10 @@ mod tests {
         assert_eq!(rail_back_target(RailView::Folder), Some(RailView::Insights));
         assert_eq!(
             rail_back_target(RailView::LargestFiles),
+            Some(RailView::Insights)
+        );
+        assert_eq!(
+            rail_back_target(RailView::ScanCoverage),
             Some(RailView::Insights)
         );
     }
@@ -5163,6 +5253,10 @@ impl App {
                 self.draw_menu_monitor(ui, rect);
                 return;
             }
+            RailView::ScanCoverage => {
+                self.draw_scan_coverage(ui, rect);
+                return;
+            }
             RailView::LargestFiles => {
                 self.draw_largest_files(ui, rect);
                 return;
@@ -6312,6 +6406,12 @@ impl App {
                             palette.accent,
                         ),
                         (
+                            "COV",
+                            "SCAN COVERAGE",
+                            "Scan coverage explains what the completed map could not read without starting another scan.",
+                            palette.accent,
+                        ),
+                        (
                             "02",
                             "SAFE OR CAUTION",
                             "Safe targets rebuild automatically. Caution targets may need a download or reinstall, so DiskDeck never pre-selects them.",
@@ -6506,6 +6606,11 @@ impl App {
                 RailView::Guide,
             ),
             (
+                "Scan coverage",
+                "Explain unavailable personal and macOS locations".into(),
+                RailView::ScanCoverage,
+            ),
+            (
                 "External drives",
                 if self.external_volumes.is_empty() {
                     "Mounted local drives · scan only when you ask".into()
@@ -6604,6 +6709,11 @@ impl App {
         if let Some(target) = open {
             self.rail_view = target;
             match target {
+                RailView::ScanCoverage => {
+                    let state = self.scan.as_ref().map(ScanHandle::state);
+                    let root = self.scan.as_ref().map(|scan| &scan.root);
+                    self.scan_coverage = scan_coverage_for_completed_map(state, root);
+                }
                 RailView::LargestFiles => {
                     let state = self.scan.as_ref().map(ScanHandle::state);
                     let root = self.scan.as_ref().map(|scan| &scan.root);
@@ -8314,6 +8424,223 @@ impl App {
         });
         if changed {
             self.apply_monitor_settings(next);
+        }
+    }
+
+    fn draw_scan_coverage(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let meta = self
+            .scan_coverage
+            .as_ref()
+            .map(|summary| format!("{} unavailable", summary.total_denied))
+            .unwrap_or_else(|| "completed map required".into());
+        let content = panel_chrome(ui, rect, "Scan coverage", Some((meta, palette.faint)));
+        let semantic_title = Rect::from_min_size(rect.min + vec2(10.0, 2.0), vec2(180.0, 28.0));
+        ui.interact(
+            semantic_title,
+            ui.id().with("scan-coverage-heading"),
+            Sense::hover(),
+        )
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Scan coverage"));
+        let nav = Rect::from_min_size(
+            content.min + vec2(10.0, 4.0),
+            vec2(content.width() - 20.0, 30.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(nav), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("← Insights")
+                            .font(theme::display_md(10.5))
+                            .color(palette.accent),
+                    )
+                    .frame(false),
+                )
+                .on_hover_text("Back to Insights")
+                .clicked()
+            {
+                self.rail_view = RailView::Insights;
+            }
+        });
+
+        let footer = Rect::from_min_max(
+            pos2(content.min.x + 10.0, content.max.y - 48.0),
+            pos2(content.max.x - 10.0, content.max.y - 4.0),
+        );
+        let body = Rect::from_min_max(
+            pos2(content.min.x + 10.0, nav.max.y + 5.0),
+            pos2(content.max.x - 10.0, footer.min.y - 8.0),
+        );
+        let status = Rect::from_min_size(body.min, vec2(body.width(), 34.0));
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(status), |ui| {
+            Frame::none()
+                .fill(palette.accent_dim(12))
+                .stroke(Stroke::new(1.0, palette.edge_soft))
+                .rounding(Rounding::same(8.0))
+                .inner_margin(Margin::symmetric(10.0, 7.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("LOCAL COVERAGE · COMPLETED MAP")
+                            .font(theme::mono(9.5))
+                            .color(palette.accent),
+                    );
+                });
+        });
+
+        let report = Rect::from_min_max(pos2(body.min.x, status.max.y + 8.0), body.max);
+        let summary = self.scan_coverage.as_ref();
+        let mut requested = None;
+        ui.allocate_new_ui(
+            egui::UiBuilder::new().max_rect(report),
+            |ui| match summary {
+                None => {
+                    ui.label(
+                        RichText::new("Finish a Macintosh HD scan to review its coverage.")
+                            .font(theme::body(10.5))
+                            .color(palette.ink),
+                    );
+                    ui.label(
+                        RichText::new("Opening Scan coverage never starts a scan.")
+                            .font(theme::body(9.5))
+                            .color(palette.muted),
+                    );
+                    ui.add_space(10.0);
+                    if ui.button("Return to reclaim summary").clicked() {
+                        self.rail_view = RailView::Summary;
+                    }
+                }
+                Some(summary) => {
+                    let (headline, detail, tone) = if summary.total_denied == 0 {
+                        (
+                            "No unavailable locations reported",
+                            "The completed map did not encounter an unreadable directory.",
+                            palette.safe,
+                        )
+                    } else if summary.personal_denied > 0 {
+                        (
+                            "Personal folders need attention",
+                            "Full Disk Access may help. Enable DiskDeck, then rescan Macintosh HD.",
+                            palette.caution,
+                        )
+                    } else {
+                        (
+                        "Personal folders appear available",
+                        "macOS still protects some system locations. A residual count is normal.",
+                        palette.safe,
+                    )
+                    };
+                    Frame::none()
+                        .fill(palette.surface)
+                        .stroke(Stroke::new(1.0, palette.edge_soft))
+                        .rounding(Rounding::same(8.0))
+                        .inner_margin(Margin::symmetric(10.0, 8.0))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(headline)
+                                    .font(theme::display_md(10.5))
+                                    .color(tone),
+                            );
+                            ui.label(
+                                RichText::new(detail)
+                                    .font(theme::body(9.0))
+                                    .color(palette.muted),
+                            );
+                            if summary.personal_denied > 0 {
+                                ui.add_space(5.0);
+                                if ui.button("Open Full Disk Access").clicked() {
+                                    requested = Some(ScanCoverageAction::OpenFullDiskAccess);
+                                }
+                            }
+                        });
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} PERSONAL · {} SYSTEM · {} TOTAL",
+                            summary.personal_denied, summary.system_denied, summary.total_denied
+                        ))
+                        .font(theme::mono(9.0))
+                        .color(palette.faint),
+                    );
+                    ui.add_space(5.0);
+                    if summary.results.is_empty() {
+                        return;
+                    }
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for location in &summary.results {
+                                Frame::none()
+                                    .fill(palette.surface)
+                                    .stroke(Stroke::new(1.0, palette.edge_soft))
+                                    .rounding(Rounding::same(7.0))
+                                    .inner_margin(Margin::symmetric(8.0, 5.0))
+                                    .show(ui, |ui| {
+                                        let (row, _) = ui.allocate_exact_size(
+                                            vec2(ui.available_width(), 28.0),
+                                            Sense::hover(),
+                                        );
+                                        let columns = CoverageRowLayout::from_rect(row);
+                                        ui.allocate_new_ui(
+                                            egui::UiBuilder::new().max_rect(columns.path),
+                                            |ui| {
+                                                ui.add(
+                                                    Label::new(
+                                                        RichText::new(&location.display_path)
+                                                            .font(theme::mono(8.5))
+                                                            .color(palette.muted),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            },
+                                        );
+                                        ui.allocate_new_ui(
+                                            egui::UiBuilder::new().max_rect(columns.kind),
+                                            |ui| {
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(egui::Align::Min),
+                                                    |ui| {
+                                                        let (label, color) = match location.kind {
+                                                            CoverageKind::Personal => {
+                                                                ("PERSONAL", palette.caution)
+                                                            }
+                                                            CoverageKind::System => {
+                                                                ("SYSTEM", palette.faint)
+                                                            }
+                                                        };
+                                                        ui.label(
+                                                            RichText::new(label)
+                                                                .font(theme::mono(8.0))
+                                                                .color(color),
+                                                        );
+                                                    },
+                                                );
+                                            },
+                                        );
+                                    });
+                                ui.add_space(5.0);
+                            }
+                        });
+                }
+            },
+        );
+
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(footer), |ui| {
+            ui.separator();
+            ui.label(
+                RichText::new(
+                    "Local only · paths are not saved · no reveal, clean, or move actions",
+                )
+                .font(theme::body(9.0))
+                .color(palette.faint),
+            );
+        });
+
+        if requested == Some(ScanCoverageAction::OpenFullDiskAccess) {
+            open_full_disk_access();
+            self.ops(
+                OpsKind::Info,
+                "opening System Settings → Privacy → Full Disk Access — enable DiskDeck, then rescan",
+            );
         }
     }
 
