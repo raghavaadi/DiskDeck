@@ -2429,6 +2429,13 @@ struct GuideLayout {
     action: Rect,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FolderLensLayout {
+    nav: Rect,
+    body: Rect,
+    footer: Rect,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GuidePrimaryAction {
     enabled: bool,
@@ -2683,6 +2690,36 @@ fn guide_layout(content: Rect) -> GuideLayout {
         pos2(inset.max.x, action.min.y - 8.0),
     );
     GuideLayout { nav, body, action }
+}
+
+fn folder_lens_layout(content: Rect) -> FolderLensLayout {
+    let inset = content.shrink2(vec2(12.0, 8.0));
+    let nav = Rect::from_min_size(inset.min, vec2(inset.width(), 30.0));
+    let footer = Rect::from_min_max(pos2(inset.min.x, inset.max.y - 74.0), inset.max);
+    let body = Rect::from_min_max(
+        pos2(inset.min.x, nav.max.y + 6.0),
+        pos2(inset.max.x, footer.min.y - 8.0),
+    );
+    FolderLensLayout { nav, body, footer }
+}
+
+fn folder_lens_action(
+    state: Option<ScanState>,
+    choosing: bool,
+    available: bool,
+) -> (&'static str, bool) {
+    if choosing {
+        ("Choosing…", false)
+    } else if state.is_some() && !available {
+        ("Folder unavailable", false)
+    } else {
+        match state {
+            Some(ScanState::Running) => ("Stop scan", true),
+            Some(ScanState::Done | ScanState::Aborted) => ("Scan again", available),
+            Some(ScanState::Idle) | None if available => ("Choose a folder…", true),
+            Some(ScanState::Idle) | None => ("Finish current task", false),
+        }
+    }
 }
 
 enum MapActionRequest {
@@ -3309,6 +3346,7 @@ mod tests {
             rail_back_target(RailView::External),
             Some(RailView::Insights)
         );
+        assert_eq!(rail_back_target(RailView::Folder), Some(RailView::Insights));
     }
 
     #[test]
@@ -3344,6 +3382,36 @@ mod tests {
         assert!(layout.body.max.y < layout.action.min.y);
         assert_eq!(layout.action.max, content.shrink2(vec2(12.0, 8.0)).max);
         assert!(layout.body.height() > 300.0);
+    }
+
+    #[test]
+    fn folder_lens_layout_keeps_navigation_body_and_safety_footer_separate() {
+        let content = Rect::from_min_size(Pos2::ZERO, vec2(320.0, 600.0));
+        let layout = folder_lens_layout(content);
+        assert!(layout.nav.max.y < layout.body.min.y);
+        assert!(layout.body.max.y < layout.footer.min.y);
+        assert!(layout.body.height() > 400.0);
+    }
+
+    #[test]
+    fn folder_lens_action_copy_covers_idle_busy_running_complete_and_unavailable() {
+        assert_eq!(
+            folder_lens_action(None, false, true),
+            ("Choose a folder…", true)
+        );
+        assert_eq!(folder_lens_action(None, true, false), ("Choosing…", false));
+        assert_eq!(
+            folder_lens_action(Some(ScanState::Running), false, true),
+            ("Stop scan", true)
+        );
+        assert_eq!(
+            folder_lens_action(Some(ScanState::Done), false, true),
+            ("Scan again", true)
+        );
+        assert_eq!(
+            folder_lens_action(Some(ScanState::Done), false, false),
+            ("Folder unavailable", false)
+        );
     }
 
     #[test]
@@ -3860,6 +3928,22 @@ impl eframe::App for App {
         self.poll_external_scan();
         self.poll_folder_picker();
         self.poll_folder_scan();
+        if self.rail_view == RailView::Folder {
+            let dropped_paths: Vec<Option<PathBuf>> = ctx.input(|input| {
+                input
+                    .raw
+                    .dropped_files
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect()
+            });
+            if !dropped_paths.is_empty() {
+                match folder_drop_path(&dropped_paths) {
+                    Ok(path) => self.begin_folder_scan(path),
+                    Err(error) => self.folder_error = Some(error.into()),
+                }
+            }
+        }
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
             self.open_storage_search();
         }
@@ -5078,11 +5162,313 @@ impl App {
             "Folder Lens",
             Some(("local · read-only".into(), palette.faint)),
         );
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content), |ui| {
-            if ui.button("← Insights").clicked() {
-                self.rail_view = RailView::Insights;
+        let semantic_title = Rect::from_min_size(rect.min + vec2(10.0, 2.0), vec2(160.0, 28.0));
+        ui.interact(
+            semantic_title,
+            ui.id().with("folder-lens-heading"),
+            Sense::hover(),
+        )
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Folder Lens"));
+
+        let layout = folder_lens_layout(content);
+        let mut go_back = false;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(layout.nav), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("← Insights")
+                            .font(theme::display_md(10.5))
+                            .color(palette.accent),
+                    )
+                    .frame(false),
+                )
+                .on_hover_text("Back to Insights")
+                .clicked()
+            {
+                go_back = true;
             }
         });
+
+        let internal_scanning = self.scanning();
+        let external_scanning = self.external_scanning();
+        let folder_scanning = self.folder_scanning();
+        let choosing = self.folder_picker_rx.is_some();
+        let can_start = can_start_auxiliary_scan(
+            internal_scanning,
+            external_scanning,
+            folder_scanning,
+            choosing,
+            self.mutation_busy(),
+            self.file_review_rx.is_some(),
+        );
+        let session_state = self
+            .folder_session
+            .as_ref()
+            .map(|session| session.scan.state());
+        let disconnected = self
+            .folder_session
+            .as_ref()
+            .is_some_and(|session| session.disconnected);
+        let action_available = if session_state == Some(ScanState::Running) {
+            !disconnected
+        } else if session_state.is_some() {
+            !disconnected && can_start
+        } else {
+            can_start
+        };
+        let (action_label, action_enabled) =
+            folder_lens_action(session_state, choosing, action_available);
+        let selected = self.folder_session.as_ref().map(|session| {
+            (
+                session.target.name.clone(),
+                session.target.path.clone(),
+                session.scan.root.files(),
+                session.scan.root.bytes(),
+                session.scan.denied.load(Relaxed),
+            )
+        });
+        let folder_error = self.folder_error.clone();
+        let mut primary_clicked = false;
+        let mut choose_another = false;
+
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(layout.body), |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    Frame::none()
+                        .fill(palette.accent_dim(12))
+                        .stroke(Stroke::new(1.0, palette.accent_dim(75)))
+                        .rounding(Rounding::same(9.0))
+                        .inner_margin(Margin::symmetric(11.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new("FOCUSED STORAGE MAP")
+                                    .font(theme::display_md(9.5))
+                                    .color(palette.accent),
+                            );
+                            ui.label(
+                                RichText::new(
+                                    "Inspect one local folder without changing the Macintosh HD scan.",
+                                )
+                                .font(theme::body(9.5))
+                                .color(palette.muted),
+                            );
+                        });
+                    ui.add_space(9.0);
+
+                    if let Some((name, path, files, bytes, denied)) = selected {
+                        Frame::none()
+                            .fill(palette.surface)
+                            .stroke(Stroke::new(
+                                1.0,
+                                if disconnected {
+                                    palette.caution
+                                } else {
+                                    palette.edge_soft
+                                },
+                            ))
+                            .rounding(Rounding::same(10.0))
+                            .inner_margin(Margin::symmetric(11.0, 10.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(tail_str(&name, 34))
+                                            .font(theme::display_md(12.0))
+                                            .color(palette.ink),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                RichText::new(if disconnected {
+                                                    "UNAVAILABLE"
+                                                } else {
+                                                    "READ-ONLY"
+                                                })
+                                                .font(theme::mono(8.0))
+                                                .color(if disconnected {
+                                                    palette.caution
+                                                } else {
+                                                    palette.safe
+                                                }),
+                                            );
+                                        },
+                                    );
+                                });
+                                ui.label(
+                                    RichText::new(tail_str(&path.display().to_string(), 54))
+                                        .font(theme::mono(8.5))
+                                        .color(palette.muted),
+                                );
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(fmt_bytes(bytes))
+                                            .font(theme::mono(16.0))
+                                            .color(palette.accent),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("{} items", fmt_count(files)))
+                                            .font(theme::body(9.5))
+                                            .color(palette.faint),
+                                    );
+                                    if denied > 0 {
+                                        ui.label(
+                                            RichText::new(format!("{denied} no access"))
+                                                .font(theme::body(9.0))
+                                                .color(palette.caution),
+                                        );
+                                    }
+                                });
+                            });
+                        ui.add_space(9.0);
+
+                        primary_clicked = ui
+                            .add_enabled_ui(action_enabled, |ui| {
+                                ui.add_sized(
+                                    vec2(ui.available_width(), 36.0),
+                                    egui::Button::new(
+                                        RichText::new(action_label)
+                                            .font(theme::display_md(10.5))
+                                            .color(if action_enabled {
+                                                palette.accent
+                                            } else {
+                                                palette.faint
+                                            }),
+                                    )
+                                    .fill(if action_enabled {
+                                        palette.accent_dim(18)
+                                    } else {
+                                        palette.surface_raised
+                                    })
+                                    .stroke(Stroke::new(
+                                        1.0,
+                                        if action_enabled {
+                                            palette.accent
+                                        } else {
+                                            palette.edge_soft
+                                        },
+                                    ))
+                                    .rounding(Rounding::same(8.0)),
+                                )
+                            })
+                            .inner
+                            .clicked();
+                        ui.add_space(6.0);
+                        choose_another = ui
+                            .add_enabled(
+                                !folder_scanning && can_start,
+                                egui::Button::new("Choose another folder…"),
+                            )
+                            .clicked();
+                    } else {
+                        let (drop_rect, _) = ui.allocate_exact_size(
+                            vec2(ui.available_width(), 102.0),
+                            Sense::hover(),
+                        );
+                        ui.painter().rect_filled(
+                            drop_rect,
+                            Rounding::same(10.0),
+                            palette.surface,
+                        );
+                        ui.painter().rect_stroke(
+                            drop_rect,
+                            Rounding::same(10.0),
+                            Stroke::new(1.0, palette.accent_dim(95)),
+                        );
+                        ui.painter().text(
+                            drop_rect.center() - vec2(0.0, 8.0),
+                            Align2::CENTER_CENTER,
+                            "Drop one Finder folder here",
+                            theme::display_md(10.5),
+                            palette.ink,
+                        );
+                        ui.painter().text(
+                            drop_rect.center() + vec2(0.0, 13.0),
+                            Align2::CENTER_CENTER,
+                            "Local folders only · never a whole volume",
+                            theme::body(9.0),
+                            palette.faint,
+                        );
+                        ui.interact(
+                            drop_rect,
+                            ui.id().with("folder-drop-zone"),
+                            Sense::hover(),
+                        )
+                        .widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Label,
+                                true,
+                                "Drop one Finder folder here",
+                            )
+                        });
+                        ui.add_space(10.0);
+                        primary_clicked = ui
+                            .add_enabled_ui(action_enabled, |ui| {
+                                ui.add_sized(
+                                    vec2(ui.available_width(), 38.0),
+                                    egui::Button::new(action_label),
+                                )
+                            })
+                            .inner
+                            .clicked();
+                        if !can_start && !choosing {
+                            ui.add_space(5.0);
+                            ui.label(
+                                RichText::new("Finish current task")
+                                    .font(theme::body(9.0))
+                                    .color(palette.faint),
+                            );
+                        }
+                    }
+
+                    if let Some(error) = folder_error {
+                        ui.add_space(9.0);
+                        ui.label(
+                            RichText::new(error)
+                                .font(theme::body(9.5))
+                                .color(palette.caution),
+                        );
+                    }
+                });
+        });
+
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(layout.footer), |ui| {
+            Frame::none()
+                .fill(palette.safe_dim(12))
+                .stroke(Stroke::new(1.0, palette.safe_dim(75)))
+                .rounding(Rounding::same(9.0))
+                .inner_margin(Margin::symmetric(10.0, 9.0))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new("Folder Lens can inspect, open, reveal, and search. It cannot reclaim or move anything.")
+                                .font(theme::body(9.0))
+                                .color(palette.safe),
+                        )
+                        .wrap(),
+                    );
+                });
+        });
+
+        if go_back {
+            self.rail_view = RailView::Insights;
+        } else if choose_another || (primary_clicked && session_state.is_none()) {
+            self.begin_folder_picker();
+        } else if primary_clicked && session_state == Some(ScanState::Running) {
+            if let Some(session) = &self.folder_session {
+                session.scan.cancel.store(true, Relaxed);
+            }
+            self.ops(OpsKind::Amber, "folder scan stop requested");
+        } else if primary_clicked {
+            if let Some(path) = self
+                .folder_session
+                .as_ref()
+                .map(|session| session.target.path.clone())
+            {
+                self.begin_folder_scan(path);
+            }
+        }
     }
 
     fn draw_reclaim_summary(&mut self, ui: &mut egui::Ui, rect: Rect) {
@@ -5778,7 +6164,7 @@ impl App {
                         (
                             "01",
                             "READ-ONLY FIRST",
-                            "Scanning and exploring the map do not change files. Use Find or right-click a real map item to inspect it without memorizing shortcuts.",
+                            "Use Find or right-click the map to inspect storage. Folder Lens answers a focused folder question; Guided Reclaim builds a Safe-only plan.",
                             palette.accent,
                         ),
                         (
@@ -5985,6 +6371,11 @@ impl App {
                 RailView::External,
             ),
             (
+                "Folder Lens",
+                "Choose or drop one local folder for a read-only map".into(),
+                RailView::Folder,
+            ),
+            (
                 "Reclaim History",
                 if self.reclaim_history.items.is_empty() {
                     "Cleanup receipts and verified Trash recovery".into()
@@ -6070,6 +6461,7 @@ impl App {
                 RailView::Developer => self.begin_developer_refresh(false),
                 RailView::Apfs => self.begin_apfs_refresh(),
                 RailView::External => self.refresh_external_volumes(),
+                RailView::Folder => {}
                 _ => {}
             }
         }
