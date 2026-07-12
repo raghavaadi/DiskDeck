@@ -55,4 +55,24 @@ FIRST_SIGN_LINE=$(grep -n -m 1 'codesign --force' "$BUNDLER" | cut -d: -f1)
 [ "$UNIVERSAL_CHECK_LINE" -lt "$FIRST_SIGN_LINE" ] \
     || fail "universal slices must be verified before code signing"
 
+WORKFLOW="$ROOT/.github/workflows/ci.yml"
+for required in \
+    'apple-silicon-test:' \
+    'name: Apple Silicon checks' \
+    'runs-on: macos-14' \
+    'test "$(uname -m)" = arm64' \
+    'intel-test:' \
+    'name: Intel checks' \
+    'runs-on: macos-15-intel' \
+    'test "$(uname -m)" = x86_64'
+do
+    grep -Fq -- "$required" "$WORKFLOW" \
+        || fail "CI is missing native architecture witness: $required"
+done
+
+[ "$(grep -Fc 'cargo test --locked' "$WORKFLOW")" -ge 2 ] \
+    || fail "both native CI jobs must run locked Rust tests"
+[ "$(grep -Fc 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' "$WORKFLOW")" -ge 2 ] \
+    || fail "both native CI jobs must use the pinned checkout action"
+
 echo "universal binary checks passed"
