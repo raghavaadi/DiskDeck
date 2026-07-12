@@ -134,10 +134,20 @@ codesign --verify --deep --strict "$APP" && echo "✓ signed as: $IDENTITY"
 
 if [ "$DISTRIBUTION" = "1" ]; then
   NOTARY_ARCHIVE="$BUILD/notary-upload.zip"
+  NOTARY_RESULT="$BUILD/notary-result.plist"
   COPYFILE_DISABLE=1 ditto --norsrc --noextattr -c -k --keepParent \
     "$APP" "$NOTARY_ARCHIVE"
-  xcrun notarytool submit "$NOTARY_ARCHIVE" \
-    --keychain-profile "$NOTARY_PROFILE" --wait
+  if ! xcrun notarytool submit "$NOTARY_ARCHIVE" \
+    --keychain-profile "$NOTARY_PROFILE" \
+    --wait --timeout 1h --output-format plist > "$NOTARY_RESULT"; then
+    echo "✗ Apple notarization submission failed" >&2
+    exit 1
+  fi
+  NOTARY_STATUS=$(/usr/libexec/PlistBuddy -c 'Print :status' "$NOTARY_RESULT" 2>/dev/null || true)
+  if [ "$NOTARY_STATUS" != "Accepted" ]; then
+    echo "✗ Apple notarization status was ${NOTARY_STATUS:-unavailable}, not Accepted" >&2
+    exit 1
+  fi
   xcrun stapler staple "$APP"
   xcrun stapler validate "$APP"
   codesign --verify --deep --strict "$APP"

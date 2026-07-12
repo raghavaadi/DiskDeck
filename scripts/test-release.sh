@@ -90,6 +90,10 @@ for required in \
     '--options runtime' \
     '--timestamp' \
     'notarytool submit' \
+    '--output-format plist' \
+    '--timeout 1h' \
+    'Print :status' \
+    'Accepted' \
     'stapler staple' \
     'stapler validate'
 do
