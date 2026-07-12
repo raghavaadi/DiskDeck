@@ -138,6 +138,7 @@ on run argv
                 delay 0.5
                 if not (exists button "← Insights" of appGroup) then error "Growth Watch rail did not open." number 1
                 if not (exists button "Refresh" of appGroup) then error "Growth Watch Refresh control is unavailable." number 1
+                if not (exists static text "STORAGE FORECAST" of appGroup) then error "Storage Forecast card is unavailable." number 1
                 return "PASS: Growth Watch rail available"
             else if commandName is "developer-lens-visible" then
                 my openInsights(appGroup)
@@ -167,6 +168,7 @@ on run argv
                 click button "Menu-bar monitor" of appGroup
                 delay 0.5
                 if not (exists button "← Insights" of appGroup) then error "Menu-bar monitor rail did not open." number 1
+                if not (exists static text "FOREGROUND FORECAST" of appGroup) then error "Foreground Forecast explanation is unavailable." number 1
                 return "PASS: Menu-bar monitor rail available"
             else if commandName is "file-review-visible" then
                 my openInsights(appGroup)

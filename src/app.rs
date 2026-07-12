@@ -8,6 +8,7 @@ use crate::clean::{
 };
 use crate::developer;
 use crate::file_review::{self, ReviewResult};
+use crate::forecast::{self, Confidence, ForecastState};
 use crate::history::{
     default_history_dir, load_growth_watch, record_scan, set_folder_watched, GrowthSummary,
     GrowthWatch, HistoryEvent, TimelinePoint,
@@ -1290,6 +1291,40 @@ fn plan_status_copy(plan: &ReclaimPlan) -> String {
     }
 }
 
+fn confidence_copy(confidence: Confidence) -> &'static str {
+    match confidence {
+        Confidence::Early => "Early estimate",
+        Confidence::Developing => "Developing estimate",
+        Confidence::Reliable => "Reliable estimate",
+    }
+}
+
+fn forecast_headline(forecast: &ForecastState) -> String {
+    match forecast {
+        ForecastState::NeedHistory {
+            observations,
+            span_days,
+        } => format!(
+            "Not enough history yet — {observations} compatible scan(s) across {span_days} day(s)."
+        ),
+        ForecastState::AlreadyLow { .. } => {
+            "Storage is already below your low-space threshold.".into()
+        }
+        ForecastState::Flat { .. } => "Storage use is roughly steady.".into(),
+        ForecastState::Improving { .. } => "Free space is improving across recent scans.".into(),
+        ForecastState::Volatile { .. } => {
+            "Recent storage changes are too volatile for an honest forecast.".into()
+        }
+        ForecastState::Estimate(estimate) => {
+            let low_weeks = (estimate.days_low + 6) / 7;
+            let high_weeks = (estimate.days_high + 6) / 7;
+            format!(
+                "At the recent rate, storage may become low in about {low_weeks}–{high_weeks} weeks."
+            )
+        }
+    }
+}
+
 fn guided_layout(content: Rect) -> GuidedLayout {
     let inset = content.shrink2(vec2(12.0, 8.0));
     let nav = Rect::from_min_size(inset.min, vec2(inset.width(), 30.0));
@@ -1445,6 +1480,74 @@ mod tests {
         assert_eq!(
             plan_status_copy(&plan),
             "This Safe plan reaches the goal with about 11.0 GB selected."
+        );
+    }
+
+    #[test]
+    fn forecast_confidence_uses_plain_language() {
+        assert_eq!(confidence_copy(Confidence::Early), "Early estimate");
+        assert_eq!(
+            confidence_copy(Confidence::Developing),
+            "Developing estimate"
+        );
+        assert_eq!(confidence_copy(Confidence::Reliable), "Reliable estimate");
+    }
+
+    #[test]
+    fn forecast_headline_is_honest_for_non_estimate_states() {
+        assert_eq!(
+            forecast_headline(&ForecastState::NeedHistory {
+                observations: 2,
+                span_days: 6,
+            }),
+            "Not enough history yet — 2 compatible scan(s) across 6 day(s)."
+        );
+        assert_eq!(
+            forecast_headline(&ForecastState::AlreadyLow {
+                free_bytes: 9 * GB,
+                threshold_bytes: 10 * GB,
+            }),
+            "Storage is already below your low-space threshold."
+        );
+        assert_eq!(
+            forecast_headline(&ForecastState::Flat {
+                observations: 5,
+                span_days: 14,
+            }),
+            "Storage use is roughly steady."
+        );
+        assert_eq!(
+            forecast_headline(&ForecastState::Improving {
+                bytes_per_day: -GB,
+                observations: 5,
+                span_days: 14,
+            }),
+            "Free space is improving across recent scans."
+        );
+        assert_eq!(
+            forecast_headline(&ForecastState::Volatile {
+                observations: 5,
+                span_days: 14,
+            }),
+            "Recent storage changes are too volatile for an honest forecast."
+        );
+    }
+
+    #[test]
+    fn forecast_headline_rounds_estimate_range_up_to_weeks() {
+        let estimate = crate::forecast::StorageForecast {
+            confidence: Confidence::Developing,
+            days_low: 8,
+            days_high: 29,
+            bytes_per_day: GB,
+            observations: 6,
+            span_days: 16,
+            latest_free_bytes: 40 * GB,
+            threshold_bytes: 10 * GB,
+        };
+        assert_eq!(
+            forecast_headline(&ForecastState::Estimate(estimate)),
+            "At the recent rate, storage may become low in about 2–5 weeks."
         );
     }
 
@@ -3509,8 +3612,16 @@ impl App {
         }
     }
 
+    fn current_forecast(&self) -> ForecastState {
+        forecast::analyze(
+            &self.growth_watch.capacity,
+            self.monitor_settings.threshold_gb as i64 * 1_000_000_000,
+        )
+    }
+
     fn draw_growth_watch(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let palette = theme::palette(ui.ctx());
+        let forecast = self.current_forecast();
         let meta = format!(
             "{} snapshots · local only",
             self.growth_watch.timeline.len()
@@ -3561,6 +3672,7 @@ impl App {
             pos2(content.max.x - 10.0, content.max.y - 4.0),
         );
         let mut watch_change: Option<(std::path::PathBuf, bool)> = None;
+        let mut start_scan = false;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list), |ui| {
             if let Some(error) = &self.growth_watch_error {
                 ui.label(
@@ -3578,27 +3690,87 @@ impl App {
                 );
                 return;
             }
-            if self.growth_watch.timeline.is_empty() {
-                ui.label(
-                    RichText::new("Complete a scan to create the first local baseline.")
-                        .font(theme::body(10.5))
-                        .color(palette.muted),
-                );
-                return;
-            }
-
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.label(
-                        RichText::new("TOTAL STORAGE TREND")
+                        RichText::new("STORAGE FORECAST")
                             .font(theme::display_md(9.5))
-                            .color(palette.muted),
+                            .color(palette.accent),
                     );
-                    let (chart, _) =
-                        ui.allocate_exact_size(vec2(ui.available_width(), 76.0), Sense::hover());
-                    draw_growth_sparkline(ui, chart, &self.growth_watch.timeline);
-                    ui.add_space(8.0);
+                    Frame::none()
+                        .fill(palette.surface)
+                        .stroke(Stroke::new(1.0, palette.edge_soft))
+                        .rounding(Rounding::same(8.0))
+                        .inner_margin(Margin::symmetric(10.0, 9.0))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                RichText::new(forecast_headline(&forecast))
+                                    .font(theme::body(10.5))
+                                    .color(palette.ink),
+                            );
+                            if let ForecastState::Estimate(estimate) = &forecast {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} · {} compatible scans · {} days · median loss {}/day",
+                                        confidence_copy(estimate.confidence),
+                                        estimate.observations,
+                                        estimate.span_days,
+                                        fmt_bytes(estimate.bytes_per_day)
+                                    ))
+                                    .font(theme::mono(8.5))
+                                    .color(palette.muted),
+                                );
+                            }
+                            ui.label(
+                                RichText::new(
+                                    "Guidance from completed local scans — not reclaimable space or a guarantee.",
+                                )
+                                .font(theme::body(9.0))
+                                .color(palette.faint),
+                            );
+                            if matches!(forecast, ForecastState::NeedHistory { .. }) {
+                                ui.add_space(4.0);
+                                if ui
+                                    .add_enabled(
+                                        !self.scanning(),
+                                        egui::Button::new(
+                                            RichText::new(if self.scanning() {
+                                                "Scanning…"
+                                            } else {
+                                                "Scan now"
+                                            })
+                                            .font(theme::display_md(9.5)),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    start_scan = true;
+                                }
+                            }
+                        });
+                    ui.add_space(10.0);
+
+                    if self.growth_watch.timeline.is_empty() {
+                        ui.label(
+                            RichText::new("Complete a scan to create the first local baseline.")
+                                .font(theme::body(10.5))
+                                .color(palette.muted),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("TOTAL STORAGE TREND")
+                                .font(theme::display_md(9.5))
+                                .color(palette.muted),
+                        );
+                        let (chart, _) = ui.allocate_exact_size(
+                            vec2(ui.available_width(), 76.0),
+                            Sense::hover(),
+                        );
+                        draw_growth_sparkline(ui, chart, &self.growth_watch.timeline);
+                        ui.add_space(8.0);
+                    }
 
                     if self.growth_watch.timeline.len() == 1 {
                         ui.label(
@@ -3742,6 +3914,9 @@ impl App {
         });
         if let Some((path, watched)) = watch_change {
             self.set_growth_folder(path, watched);
+        }
+        if start_scan {
+            self.begin_scan();
         }
     }
 
@@ -4179,6 +4354,7 @@ impl App {
 
     fn draw_menu_monitor(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let palette = theme::palette(ui.ctx());
+        let forecast = self.current_forecast();
         let status = if self.monitor_settings.enabled {
             "enabled"
         } else {
@@ -4216,6 +4392,10 @@ impl App {
         let mut next = self.monitor_settings;
         let mut changed = false;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(body), |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.label(
                 RichText::new(
                     "A native menu-bar free-space readout updated every five minutes. It uses statfs only and never starts a disk scan.",
@@ -4266,6 +4446,30 @@ impl App {
                 }),
             );
             ui.add_space(14.0);
+            ui.label(
+                RichText::new("FOREGROUND FORECAST")
+                    .font(theme::display_md(9.5))
+                    .color(palette.accent),
+            );
+            Frame::none()
+                .fill(palette.surface)
+                .stroke(Stroke::new(1.0, palette.edge_soft))
+                .rounding(Rounding::same(8.0))
+                .inner_margin(Margin::symmetric(10.0, 9.0))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        RichText::new(forecast_headline(&forecast))
+                            .font(theme::body(10.5))
+                            .color(palette.ink),
+                    );
+                    ui.label(
+                        RichText::new("Updated only after a completed foreground scan.")
+                            .font(theme::body(9.0))
+                            .color(palette.faint),
+                    );
+                });
+            ui.add_space(14.0);
             changed |= ui
                 .checkbox(&mut next.launch_at_login, "Launch DiskDeck at login")
                 .changed();
@@ -4281,9 +4485,10 @@ impl App {
                 ui.label(
                     RichText::new(error)
                         .font(theme::body(9.5))
-                        .color(palette.danger),
+                    .color(palette.danger),
                 );
             }
+                });
         });
         if changed {
             self.apply_monitor_settings(next);
