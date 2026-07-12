@@ -104,7 +104,13 @@ rm -rf "$BUILD/stage" && mkdir -p "$BUILD/stage/DiskDeck"
 cp -R "$APP" "$BUILD/stage/DiskDeck/"
 cp scripts/install.command "$BUILD/stage/DiskDeck/Install DiskDeck.command"
 chmod +x "$BUILD/stage/DiskDeck/Install DiskDeck.command"
-ditto -c -k --keepParent "$BUILD/stage/DiskDeck" "dist/DiskDeck.zip"
+rm -f "dist/DiskDeck.zip"
+# The repository may live on an exFAT volume, where Finder-compatible copies
+# leave AppleDouble `._*` sidecars. They are not application content and can
+# confuse Gatekeeper, so omit resource forks/xattrs and validate the exact ZIP.
+COPYFILE_DISABLE=1 ditto --norsrc --noextattr -c -k --keepParent \
+  "$BUILD/stage/DiskDeck" "dist/DiskDeck.zip"
+scripts/check-dist.sh "dist/DiskDeck.zip"
 echo "✓ shareable → dist/DiskDeck.zip (app + installer)"
 
 open "$DEST"

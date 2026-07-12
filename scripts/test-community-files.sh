@@ -35,6 +35,7 @@ for expected in \
     'runs-on: macos-14' \
     'cargo fmt -- --check' \
     'scripts/test-ui-smoke.sh' \
+    'scripts/test-package-artifact.sh' \
     'scripts/test-pre-commit.sh' \
     'scripts/test-pre-push.sh' \
     'cargo test --locked'

@@ -257,6 +257,7 @@ Enable the tracked privacy and secret guard once per clone:
 
 ```sh
 git config core.hooksPath .githooks
+scripts/test-package-artifact.sh
 scripts/test-pre-commit.sh
 scripts/test-pre-push.sh
 ```

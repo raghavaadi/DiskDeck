@@ -36,6 +36,9 @@ jobs:
       - name: Validate signed UI smoke tooling
         run: scripts/test-ui-smoke.sh
 
+      - name: Test distribution artifact guard
+        run: scripts/test-package-artifact.sh
+
       - name: Test staged-content guard
         run: scripts/test-pre-commit.sh
 
