@@ -36,6 +36,9 @@ use crate::scan::{disk_stats, start_scan, DiskStats, Node, ScanHandle, ScanState
 use crate::search::{crumbs_for, search_tree, SearchSummary, DEFAULT_RESULT_LIMIT};
 use crate::theme;
 use crate::treemap;
+use crate::volumes::{
+    inspect_mounted_volume, is_same_mount, mounted_external_volumes, MountedVolume,
+};
 use egui::{
     pos2, vec2, Align2, Color32, Context, Frame, Label, Margin, Pos2, Rect, RichText, Rounding,
     Sense, Stroke,
@@ -213,6 +216,55 @@ struct TrashRestoreDialog {
     acknowledged: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MapSource {
+    Internal,
+    External,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MapCapabilities {
+    allow_offload: bool,
+}
+
+impl MapCapabilities {
+    const INTERNAL: Self = Self {
+        allow_offload: true,
+    };
+    const EXTERNAL: Self = Self {
+        allow_offload: false,
+    };
+}
+
+#[derive(Default)]
+struct MapNavigation {
+    view: Option<Arc<Node>>,
+    crumbs: Vec<Arc<Node>>,
+    zoom: Option<(Rect, Instant)>,
+}
+
+struct ExternalSession {
+    volume: MountedVolume,
+    scan: ScanHandle,
+    navigation: MapNavigation,
+    revision: u64,
+    disconnected: bool,
+    completion_reported: bool,
+}
+
+fn can_start_external_scan(
+    internal_scanning: bool,
+    external_scanning: bool,
+    mutation_busy: bool,
+    file_review_running: bool,
+) -> bool {
+    !internal_scanning && !external_scanning && !mutation_busy && !file_review_running
+}
+
+fn external_session_connected(expected: &MountedVolume, current: Option<&MountedVolume>) -> bool {
+    current.is_some_and(|current| is_same_mount(expected, current))
+}
+
 struct SearchDialog {
     query: String,
     summary: SearchSummary,
@@ -378,6 +430,9 @@ pub struct App {
     file_review: Option<ReviewResult>,
     file_review_error: Option<String>,
     search_dialog: Option<SearchDialog>,
+    external_volumes: Vec<MountedVolume>,
+    external_session: Option<ExternalSession>,
+    external_revision: u64,
 }
 
 fn now_hms() -> String {
@@ -749,6 +804,9 @@ impl App {
             file_review: None,
             file_review_error: None,
             search_dialog: None,
+            external_volumes: Vec::new(),
+            external_session: None,
+            external_revision: 0,
         }
     }
 
@@ -764,6 +822,13 @@ impl App {
     }
 
     fn begin_scan(&mut self) {
+        if self.external_scanning() {
+            self.ops(
+                OpsKind::Amber,
+                "stop the external scan before rescanning Macintosh HD",
+            );
+            return;
+        }
         invalidate_storage_search(&mut self.search_dialog);
         self.recs_revision = self.recs_revision.wrapping_add(1);
         self.guide_revision = None;
@@ -792,6 +857,119 @@ impl App {
         self.scan
             .as_ref()
             .map_or(false, |s| s.state() == ScanState::Running)
+    }
+
+    fn external_scanning(&self) -> bool {
+        self.external_session
+            .as_ref()
+            .is_some_and(|session| session.scan.state() == ScanState::Running)
+    }
+
+    fn refresh_external_volumes(&mut self) {
+        self.external_volumes = mounted_external_volumes();
+        let connected = self.external_session.as_ref().map(|session| {
+            let current = inspect_mounted_volume(&session.volume.mount_path);
+            external_session_connected(&session.volume, current.as_ref())
+        });
+        if connected == Some(false) {
+            if let Some(session) = &mut self.external_session {
+                session.disconnected = true;
+                session.scan.cancel.store(true, Relaxed);
+            }
+            invalidate_storage_search(&mut self.search_dialog);
+            self.ops(
+                OpsKind::Amber,
+                "external drive disconnected — refresh and scan again",
+            );
+        }
+    }
+
+    fn begin_external_scan(&mut self, volume_index: usize) {
+        if !can_start_external_scan(
+            self.scanning(),
+            self.external_scanning(),
+            self.mutation_busy(),
+            self.file_review_rx.is_some(),
+        ) {
+            self.ops(
+                OpsKind::Amber,
+                "finish the active scan or file operation before scanning an external drive",
+            );
+            return;
+        }
+        let Some(expected) = self.external_volumes.get(volume_index).cloned() else {
+            return;
+        };
+        let current = inspect_mounted_volume(&expected.mount_path);
+        if !external_session_connected(&expected, current.as_ref()) {
+            self.refresh_external_volumes();
+            self.ops(
+                OpsKind::Amber,
+                "that drive changed or disconnected — choose it again",
+            );
+            return;
+        }
+        self.external_revision = self.external_revision.wrapping_add(1);
+        invalidate_storage_search(&mut self.search_dialog);
+        let scan = start_scan(expected.mount_path.clone());
+        let name = expected.name.clone();
+        self.external_session = Some(ExternalSession {
+            volume: expected,
+            scan,
+            navigation: MapNavigation::default(),
+            revision: self.external_revision,
+            disconnected: false,
+            completion_reported: false,
+        });
+        self.ops(
+            OpsKind::Info,
+            format!("external scan initiated — {name} (read-only)"),
+        );
+    }
+
+    fn poll_external_scan(&mut self) {
+        let report = self.external_session.as_ref().and_then(|session| {
+            if session.completion_reported || session.scan.state() == ScanState::Running {
+                return None;
+            }
+            Some((
+                session.scan.state(),
+                session.volume.name.clone(),
+                session.scan.root.files(),
+                session.scan.root.bytes(),
+                session.scan.denied.load(Relaxed),
+                session.scan.duration_ms.load(Relaxed),
+            ))
+        });
+        let Some((state, name, files, bytes, denied, duration_ms)) = report else {
+            return;
+        };
+        if let Some(session) = &mut self.external_session {
+            session.completion_reported = true;
+        }
+        self.ops(
+            if state == ScanState::Done {
+                OpsKind::Ok
+            } else {
+                OpsKind::Amber
+            },
+            format!(
+                "external scan {} — {name}: {} items, {} mapped in {}{}",
+                if state == ScanState::Done {
+                    "complete"
+                } else {
+                    "stopped"
+                },
+                fmt_count(files),
+                fmt_bytes(bytes),
+                fmt_elapsed(Duration::from_millis(duration_ms.max(0) as u64)),
+                if denied > 0 {
+                    format!(" · {denied} no access")
+                } else {
+                    String::new()
+                }
+            ),
+        );
     }
 
     fn confirmation_dialog_open(&self) -> bool {
@@ -2626,6 +2804,47 @@ mod tests {
     }
 
     #[test]
+    fn external_volume_capabilities_never_allow_offload() {
+        assert!(MapCapabilities::INTERNAL.allow_offload);
+        assert!(!MapCapabilities::EXTERNAL.allow_offload);
+        assert_eq!(MapSource::Internal, MapSource::Internal);
+        assert_ne!(MapSource::Internal, MapSource::External);
+    }
+
+    #[test]
+    fn external_volume_scan_requires_a_completely_idle_workspace() {
+        assert!(can_start_external_scan(false, false, false, false));
+        assert!(!can_start_external_scan(true, false, false, false));
+        assert!(!can_start_external_scan(false, true, false, false));
+        assert!(!can_start_external_scan(false, false, true, false));
+        assert!(!can_start_external_scan(false, false, false, true));
+    }
+
+    #[test]
+    fn external_mount_revalidation_fails_closed() {
+        use crate::volumes::MountedVolume;
+        use std::path::PathBuf;
+
+        let expected = MountedVolume {
+            name: "Drive".into(),
+            mount_path: PathBuf::from("/Volumes/Drive"),
+            fs_type: "apfs".into(),
+            total_bytes: 1_000,
+            free_bytes: 500,
+            read_only: false,
+            device_id: 42,
+        };
+        let replacement = MountedVolume {
+            device_id: 99,
+            ..expected.clone()
+        };
+
+        assert!(external_session_connected(&expected, Some(&expected)));
+        assert!(!external_session_connected(&expected, Some(&replacement)));
+        assert!(!external_session_connected(&expected, None));
+    }
+
+    #[test]
     fn disconnected_trash_restore_worker_clears_busy_state() {
         let mut app = App::new();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2971,6 +3190,7 @@ impl eframe::App for App {
         self.poll_apfs();
         self.poll_leftovers();
         self.poll_file_review();
+        self.poll_external_scan();
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
             self.open_storage_search();
         }
@@ -3012,6 +3232,7 @@ impl eframe::App for App {
         }
         self.update_menu_monitor();
         if self.scanning()
+            || self.external_scanning()
             || self.cleaning
             || self.zoom.is_some()
             || self.stamp.is_some()
