@@ -50,6 +50,11 @@ grep -Fq 'Searches folders and large files retained in this completed map. Small
 grep -q '^ui storage-search-visible$' "$ROOT/scripts/test-signed-ui.sh" || \
     fail "signed UI smoke must open Storage Search"
 
+if grep -Fq 'enabled of button "Find  ⌘F"' "$ROOT/scripts/ui-smoke.applescript"
+then
+    fail "egui AccessKit omits AXEnabled; Storage Search smoke must poll for the opened heading"
+fi
+
 for forbidden in 'Restore' 'Reveal' 'Open Trash' 'Hold to restore'
 do
     grep -Fq "$forbidden" "$ROOT/scripts/test-signed-ui.sh" || \

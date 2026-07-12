@@ -120,9 +120,12 @@ on run argv
             if commandName is "check" then
                 return "PASS: signed UI controls available"
             else if commandName is "storage-search-visible" then
-                if not (exists button "Find  ⌘F" of appGroup) then error "Storage Search entry point is unavailable. Finish a scan first." number 1
-                click button "Find  ⌘F" of appGroup
-                delay 0.5
+                repeat with attempt from 1 to 3000
+                    if exists static text "Storage Search" of appGroup then exit repeat
+                    if exists button "Find  ⌘F" of appGroup then click button "Find  ⌘F" of appGroup
+                    delay 0.1
+                end repeat
+                if not (exists button "Find  ⌘F" of appGroup) then error "Storage Search entry point is unavailable." number 1
                 if not (exists static text "Storage Search" of appGroup) then error "Storage Search heading is unavailable." number 1
                 if not (exists text field 1 of appGroup) then error "Storage Search field is unavailable." number 1
                 if not (exists static text "Searches folders and large files retained in this completed map. Small items remain grouped." of appGroup) then error "Storage Search scope explanation is unavailable." number 1

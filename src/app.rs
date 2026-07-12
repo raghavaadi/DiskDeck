@@ -1959,6 +1959,10 @@ fn should_navigate_back_on_escape(
     escape_pressed && !menu_was_open && !menu_is_open
 }
 
+fn map_interactions_enabled(search_open: bool, zooming: bool) -> bool {
+    !search_open && !zooming
+}
+
 fn can_apply_guided_plan(
     acknowledged: bool,
     draft_revision: Option<u64>,
@@ -2184,6 +2188,14 @@ mod tests {
             assert!(layout.content.max.x <= layout.actions.min.x);
             assert!(layout.actions.width() >= 168.0);
         }
+    }
+
+    #[test]
+    fn storage_search_blocks_background_map_interactions() {
+        assert!(map_interactions_enabled(false, false));
+        assert!(!map_interactions_enabled(true, false));
+        assert!(!map_interactions_enabled(false, true));
+        assert!(!map_interactions_enabled(true, true));
     }
 
     #[test]
@@ -3559,10 +3571,11 @@ impl App {
             self.zoom = None;
         }
 
-        let interactions_enabled = zoom.is_none();
+        let interactions_enabled =
+            map_interactions_enabled(self.search_dialog.is_some(), zoom.is_some());
         let hover = ui
             .input(|input| input.pointer.hover_pos())
-            .filter(|position| map_rect.contains(*position));
+            .filter(|position| interactions_enabled && map_rect.contains(*position));
         let hovered = treemap::paint(ui, map_rect, &items, &laid, hover, zoom);
         let mut requested_action: Option<MapActionRequest> = None;
         let mut menu_open = false;
@@ -3576,7 +3589,11 @@ impl App {
             let response = ui.interact(
                 item_rect,
                 ui.id().with(("treemap-item", idx)),
-                Sense::click(),
+                if interactions_enabled {
+                    Sense::click()
+                } else {
+                    Sense::hover()
+                },
             );
             let item_node = item.node.clone();
             let offload_block = item_node
@@ -3603,43 +3620,46 @@ impl App {
                 }
             }
 
-            menu_was_open |= response.context_menu_opened();
-            response.context_menu(|menu_ui| {
-                menu_ui.set_min_width(180.0);
-                if menu_ui
-                    .add_enabled(actions.open, egui::Button::new("Open"))
-                    .clicked()
-                {
-                    requested_action = item_node.clone().map(|node| MapActionRequest::Open {
-                        node,
-                        source: item_rect,
-                    });
-                    menu_ui.close_menu();
-                }
-                if menu_ui
-                    .add_enabled(actions.reveal, egui::Button::new("Reveal in Finder"))
-                    .clicked()
-                {
-                    requested_action = item_node
-                        .as_ref()
-                        .map(|node| MapActionRequest::Reveal(node.path.clone()));
-                    menu_ui.close_menu();
-                }
-                menu_ui.separator();
-                let mut move_response =
-                    menu_ui.add_enabled(actions.move_to_ssd, egui::Button::new("Move to SSD…"));
-                if let Some(block) = offload_block {
-                    move_response = move_response.on_disabled_hover_text(block.message());
-                }
-                if move_response.clicked() {
-                    requested_action = item_node.as_ref().map(|node| MapActionRequest::MoveToSsd {
-                        path: strip_data_root(&node.path),
-                        bytes: node.bytes(),
-                    });
-                    menu_ui.close_menu();
-                }
-            });
-            menu_open |= response.context_menu_opened();
+            if interactions_enabled {
+                menu_was_open |= response.context_menu_opened();
+                response.context_menu(|menu_ui| {
+                    menu_ui.set_min_width(180.0);
+                    if menu_ui
+                        .add_enabled(actions.open, egui::Button::new("Open"))
+                        .clicked()
+                    {
+                        requested_action = item_node.clone().map(|node| MapActionRequest::Open {
+                            node,
+                            source: item_rect,
+                        });
+                        menu_ui.close_menu();
+                    }
+                    if menu_ui
+                        .add_enabled(actions.reveal, egui::Button::new("Reveal in Finder"))
+                        .clicked()
+                    {
+                        requested_action = item_node
+                            .as_ref()
+                            .map(|node| MapActionRequest::Reveal(node.path.clone()));
+                        menu_ui.close_menu();
+                    }
+                    menu_ui.separator();
+                    let mut move_response =
+                        menu_ui.add_enabled(actions.move_to_ssd, egui::Button::new("Move to SSD…"));
+                    if let Some(block) = offload_block {
+                        move_response = move_response.on_disabled_hover_text(block.message());
+                    }
+                    if move_response.clicked() {
+                        requested_action =
+                            item_node.as_ref().map(|node| MapActionRequest::MoveToSsd {
+                                path: strip_data_root(&node.path),
+                                bytes: node.bytes(),
+                            });
+                        menu_ui.close_menu();
+                    }
+                });
+                menu_open |= response.context_menu_opened();
+            }
         }
 
         if let Some(idx) = hovered.filter(|_| !menu_open) {
@@ -6558,8 +6578,26 @@ impl App {
         let mut close_requested = false;
         let mut requested: Option<(SearchAction, Arc<Node>)> = None;
 
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("storage-search-backdrop"))
+            .order(egui::Order::Middle)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (backdrop, _) = ui.allocate_exact_size(screen.size(), Sense::click());
+                ui.painter().rect_filled(
+                    backdrop,
+                    Rounding::ZERO,
+                    if ui.visuals().dark_mode {
+                        Color32::from_black_alpha(72)
+                    } else {
+                        Color32::from_black_alpha(38)
+                    },
+                );
+            });
+
         egui::Window::new(RichText::new("Storage Search").font(theme::body(13.0)))
             .id(egui::Id::new("storage-search-window"))
+            .order(egui::Order::Foreground)
             .open(&mut window_open)
             .title_bar(false)
             .collapsible(false)
