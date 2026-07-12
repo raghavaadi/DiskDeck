@@ -303,21 +303,31 @@ fn external_scan_action(
     }
 }
 
+fn active_map_source(rail_view: RailView, has_external_session: bool) -> MapSource {
+    if rail_view == RailView::External && has_external_session {
+        MapSource::External
+    } else {
+        MapSource::Internal
+    }
+}
+
 struct SearchDialog {
     query: String,
     summary: SearchSummary,
     selected: usize,
     request_focus: bool,
+    source: MapSource,
     scan_revision: u64,
 }
 
 impl SearchDialog {
-    fn new(scan_revision: u64) -> Self {
+    fn new(source: MapSource, scan_revision: u64) -> Self {
         Self {
             query: String::new(),
             summary: SearchSummary::default(),
             selected: 0,
             request_focus: true,
+            source,
             scan_revision,
         }
     }
@@ -1021,22 +1031,55 @@ impl App {
             dialog.request_focus = true;
             return;
         }
-        let state = self.scan.as_ref().map(ScanHandle::state);
-        if can_open_storage_search(state, self.confirmation_dialog_open()) {
-            self.search_dialog = Some(SearchDialog::new(self.recs_revision));
+        let source = active_map_source(self.rail_view, self.external_session.is_some());
+        let (state, revision, connected) = match source {
+            MapSource::Internal => (
+                self.scan.as_ref().map(ScanHandle::state),
+                self.recs_revision,
+                true,
+            ),
+            MapSource::External => self
+                .external_session
+                .as_ref()
+                .map(|session| {
+                    (
+                        Some(session.scan.state()),
+                        session.revision,
+                        !session.disconnected,
+                    )
+                })
+                .unwrap_or((None, self.external_revision, false)),
+        };
+        if connected && can_open_storage_search(state, self.confirmation_dialog_open()) {
+            self.search_dialog = Some(SearchDialog::new(source, revision));
         }
     }
 
-    fn open_search_folder(&mut self, root: &Arc<Node>, node: Arc<Node>) -> bool {
+    fn open_search_folder(&mut self, source: MapSource, root: &Arc<Node>, node: Arc<Node>) -> bool {
         if !node.is_dir || node.denied.load(Relaxed) {
             return false;
         }
         let Some(crumbs) = crumbs_for(root, &node) else {
             return false;
         };
-        self.crumbs = crumbs;
-        self.view = Some(node);
-        self.zoom = None;
+        match source {
+            MapSource::Internal => {
+                self.crumbs = crumbs;
+                self.view = Some(node);
+                self.zoom = None;
+            }
+            MapSource::External => {
+                let Some(session) = &mut self.external_session else {
+                    return false;
+                };
+                if session.disconnected {
+                    return false;
+                }
+                session.navigation.crumbs = crumbs;
+                session.navigation.view = Some(node);
+                session.navigation.zoom = None;
+            }
+        }
         invalidate_storage_search(&mut self.search_dialog);
         true
     }
@@ -2028,10 +2071,53 @@ impl App {
         self.rail_view = RailView::Reclaim;
     }
 
-    fn view_node(&self) -> Option<Arc<Node>> {
-        self.view
-            .clone()
-            .or_else(|| self.scan.as_ref().map(|s| s.root.clone()))
+    fn store_map_navigation(
+        &mut self,
+        source: MapSource,
+        view: Option<Arc<Node>>,
+        crumbs: Vec<Arc<Node>>,
+        zoom: Option<(Rect, Instant)>,
+    ) {
+        match source {
+            MapSource::Internal => {
+                self.view = view;
+                self.crumbs = crumbs;
+                self.zoom = zoom;
+            }
+            MapSource::External => {
+                if let Some(session) = &mut self.external_session {
+                    session.navigation.view = view;
+                    session.navigation.crumbs = crumbs;
+                    session.navigation.zoom = zoom;
+                }
+            }
+        }
+    }
+
+    fn external_path_actions_available(&mut self) -> bool {
+        let connected = self.external_session.as_ref().is_some_and(|session| {
+            let current = inspect_mounted_volume(&session.volume.mount_path);
+            external_session_connected(&session.volume, current.as_ref()) && !session.disconnected
+        });
+        if connected {
+            return true;
+        }
+        let newly_disconnected = self
+            .external_session
+            .as_ref()
+            .is_some_and(|session| !session.disconnected);
+        if let Some(session) = &mut self.external_session {
+            session.disconnected = true;
+            session.scan.cancel.store(true, Relaxed);
+        }
+        invalidate_storage_search(&mut self.search_dialog);
+        if newly_disconnected {
+            self.ops(
+                OpsKind::Amber,
+                "external drive disconnected — path actions are disabled",
+            );
+        }
+        false
     }
 }
 
@@ -2355,6 +2441,7 @@ mod tests {
             summary: crate::search::SearchSummary::default(),
             selected: 3,
             request_focus: false,
+            source: MapSource::External,
             scan_revision: 17,
         });
         invalidate_storage_search(&mut search);
@@ -2431,7 +2518,7 @@ mod tests {
         let users = storage_search_child(&root, "Users", true, false);
         let project = storage_search_child(&users, "WardenUI", true, false);
         let mut app = App::new();
-        assert!(app.open_search_folder(&root, project.clone()));
+        assert!(app.open_search_folder(MapSource::Internal, &root, project.clone()));
         assert_eq!(
             app.crumbs
                 .iter()
@@ -2442,6 +2529,52 @@ mod tests {
         assert!(Arc::ptr_eq(app.view.as_ref().unwrap(), &project));
         assert!(app.zoom.is_none());
         assert!(app.search_dialog.is_none());
+    }
+
+    #[test]
+    fn external_map_selection_and_folder_navigation_stay_isolated() {
+        assert_eq!(
+            active_map_source(RailView::External, true),
+            MapSource::External
+        );
+        assert_eq!(
+            active_map_source(RailView::External, false),
+            MapSource::Internal
+        );
+        assert_eq!(
+            active_map_source(RailView::Summary, true),
+            MapSource::Internal
+        );
+
+        let root = storage_search_root();
+        let folder = storage_search_child(&root, "Archive", true, false);
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.external_session = Some(ExternalSession {
+            volume: MountedVolume {
+                name: "QA".into(),
+                mount_path: tmp.path().to_path_buf(),
+                fs_type: "apfs".into(),
+                total_bytes: 1_000,
+                free_bytes: 500,
+                read_only: false,
+                device_id: 1,
+            },
+            scan: start_scan(tmp.path().to_path_buf()),
+            navigation: MapNavigation::default(),
+            revision: 4,
+            disconnected: false,
+            completion_reported: false,
+        });
+
+        assert!(app.open_search_folder(MapSource::External, &root, folder.clone()));
+
+        assert!(app.crumbs.is_empty());
+        assert!(app.view.is_none());
+        let navigation = &app.external_session.as_ref().unwrap().navigation;
+        assert_eq!(navigation.crumbs.len(), 1);
+        assert!(Arc::ptr_eq(navigation.view.as_ref().unwrap(), &folder));
+        assert!(navigation.zoom.is_none());
     }
 
     fn fixture_rec_row(id: &str, tier: Tier, checked: bool) -> RecRow {
@@ -3311,12 +3444,19 @@ impl eframe::App for App {
         if self.stats_at.elapsed() > Duration::from_secs(5) {
             self.stats = disk_stats();
             self.stats_at = Instant::now();
+            if self.rail_view == RailView::External && self.external_session.is_some() {
+                self.external_path_actions_available();
+            }
         }
         self.update_menu_monitor();
         if self.scanning()
             || self.external_scanning()
             || self.cleaning
             || self.zoom.is_some()
+            || self
+                .external_session
+                .as_ref()
+                .is_some_and(|session| session.navigation.zoom.is_some())
             || self.stamp.is_some()
             || self.offloading
             || self.dialog.is_some()
@@ -3353,6 +3493,38 @@ impl eframe::App for App {
 impl App {
     fn top_bar(&mut self, ctx: &Context) {
         let palette = theme::palette(ctx);
+        let source = active_map_source(self.rail_view, self.external_session.is_some());
+        let (volume_label, active_scanning, active_done, disconnected, external_index) =
+            match source {
+                MapSource::Internal => (
+                    "Macintosh HD".to_string(),
+                    self.scanning(),
+                    self.scan_done(),
+                    false,
+                    None,
+                ),
+                MapSource::External => {
+                    let session = self
+                        .external_session
+                        .as_ref()
+                        .expect("active external session");
+                    (
+                        session.volume.name.clone(),
+                        session.scan.state() == ScanState::Running,
+                        session.scan.state() == ScanState::Done,
+                        session.disconnected,
+                        self.external_volumes
+                            .iter()
+                            .position(|volume| is_same_mount(volume, &session.volume)),
+                    )
+                }
+            };
+        let external_can_start = can_start_external_scan(
+            self.scanning(),
+            self.external_scanning(),
+            self.mutation_busy(),
+            self.file_review_rx.is_some(),
+        );
         egui::TopBottomPanel::top("topbar")
             .exact_height(48.0)
             .frame(
@@ -3372,43 +3544,79 @@ impl App {
                             .color(palette.ink),
                     );
                     ui.add_space(12.0);
-                    ui.label(RichText::new("Macintosh HD").font(theme::body(11.5)).color(palette.faint));
+                    ui.label(
+                        RichText::new(tail_str(&volume_label, 30))
+                            .font(theme::body(11.5))
+                            .color(if source == MapSource::External {
+                                palette.accent
+                            } else {
+                                palette.faint
+                            }),
+                    );
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let scanning = self.scanning();
-                        let label = if scanning {
+                        let label = if active_scanning {
                             "Stop scan"
+                        } else if disconnected {
+                            "Disconnected"
+                        } else if source == MapSource::External {
+                            "Scan again"
                         } else if self.scan.is_some() {
                             "Rescan"
                         } else {
                             "Scan now"
                         };
-                        if ghost_button(ui, label, true).clicked() {
-                            if scanning {
-                                if let Some(s) = &self.scan {
-                                    s.cancel.store(true, Relaxed);
+                        let action_enabled = source == MapSource::Internal
+                            || active_scanning
+                            || (!disconnected
+                                && external_index.is_some()
+                                && external_can_start);
+                        let clicked = ui
+                            .add_enabled_ui(action_enabled, |ui| ghost_button(ui, label, true))
+                            .inner
+                            .clicked();
+                        if clicked {
+                            match source {
+                                MapSource::Internal if active_scanning => {
+                                    if let Some(scan) = &self.scan {
+                                        scan.cancel.store(true, Relaxed);
+                                    }
+                                    self.ops(OpsKind::Amber, "scan abort requested");
                                 }
-                                self.ops(OpsKind::Amber, "scan abort requested");
-                            } else {
-                                self.begin_scan();
+                                MapSource::Internal => self.begin_scan(),
+                                MapSource::External if active_scanning => {
+                                    if let Some(session) = &self.external_session {
+                                        session.scan.cancel.store(true, Relaxed);
+                                    }
+                                    self.ops(OpsKind::Amber, "external scan stop requested");
+                                }
+                                MapSource::External => {
+                                    if let Some(index) = external_index {
+                                        self.begin_external_scan(index);
+                                    }
+                                }
                             }
                         }
-                        ui.add_space(8.0);
-                        let fda = ghost_button(ui, "Full Disk Access", false);
-                        if fda.clicked() {
-                            open_full_disk_access();
-                            self.ops(OpsKind::Info,
-                                "opening System Settings → Privacy → Full Disk Access — enable DiskDeck, then rescan");
+                        if source == MapSource::Internal {
+                            ui.add_space(8.0);
+                            let fda = ghost_button(ui, "Full Disk Access", false);
+                            if fda.clicked() {
+                                open_full_disk_access();
+                                self.ops(OpsKind::Info,
+                                    "opening System Settings → Privacy → Full Disk Access — enable DiskDeck, then rescan");
+                            }
+                            fda.on_hover_text(
+                                "If parts of the disk show NO ACCESS, grant DiskDeck Full Disk Access and rescan. A residual count (~185) of root-only system dirs is normal.",
+                            );
                         }
-                        fda.on_hover_text(
-                            "If parts of the disk show NO ACCESS, grant DiskDeck Full Disk Access and rescan. A residual count (~185) of root-only system dirs is normal.",
-                        );
                         ui.add_space(8.0);
                         let status = if self.cleaning {
                             "Reclaiming"
-                        } else if self.scanning() {
+                        } else if disconnected {
+                            "Disconnected"
+                        } else if active_scanning {
                             "Scanning"
-                        } else if self.scan_done() {
+                        } else if active_done {
                             "Scan complete"
                         } else {
                             "Activity"
@@ -3417,8 +3625,10 @@ impl App {
                             egui::Button::new(
                                 RichText::new(status)
                                     .font(theme::display_md(10.5))
-                                    .color(if self.scanning() || self.cleaning {
+                                    .color(if active_scanning || self.cleaning {
                                         palette.accent
+                                    } else if disconnected {
+                                        palette.caution
                                     } else {
                                         palette.muted
                                     }),
@@ -3737,11 +3947,54 @@ impl App {
 
     fn draw_map(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let palette = theme::palette(ui.ctx());
-        let depth = self.crumbs.len();
-        let hint = self.scan.as_ref().map(|scan| {
+        let source = active_map_source(self.rail_view, self.external_session.is_some());
+        let (
+            root,
+            search_state,
+            root_label,
+            capabilities,
+            mut view,
+            mut crumbs,
+            mut zoom_state,
+            disconnected,
+        ) = match source {
+            MapSource::Internal => (
+                self.scan.as_ref().map(|scan| scan.root.clone()),
+                self.scan.as_ref().map(ScanHandle::state),
+                "Data".to_string(),
+                MapCapabilities::INTERNAL,
+                self.view.clone(),
+                self.crumbs.clone(),
+                self.zoom,
+                false,
+            ),
+            MapSource::External => {
+                let session = self
+                    .external_session
+                    .as_ref()
+                    .expect("active external session");
+                (
+                    Some(session.scan.root.clone()),
+                    Some(session.scan.state()),
+                    session.volume.name.clone(),
+                    MapCapabilities::EXTERNAL,
+                    session.navigation.view.clone(),
+                    session.navigation.crumbs.clone(),
+                    session.navigation.zoom,
+                    session.disconnected,
+                )
+            }
+        };
+        let scanning = search_state == Some(ScanState::Running);
+        let depth = crumbs.len();
+        let hint = root.as_ref().map(|root| {
             (
-                format!("{} items mapped", fmt_count(scan.root.files())),
-                palette.faint,
+                format!("{} items mapped", fmt_count(root.files())),
+                if source == MapSource::External {
+                    palette.accent
+                } else {
+                    palette.faint
+                },
             )
         });
         let content = panel_chrome(ui, rect, "Storage map", hint);
@@ -3757,8 +4010,8 @@ impl App {
         );
         let mut go_to: Option<usize> = None; // truncate crumbs to this depth
         let mut open_search = false;
-        let search_state = self.scan.as_ref().map(ScanHandle::state);
-        let search_ready = can_open_storage_search(search_state, self.confirmation_dialog_open());
+        let search_ready =
+            !disconnected && can_open_storage_search(search_state, self.confirmation_dialog_open());
         let search_open = self.search_dialog.is_some();
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(crumb_rect), |ui| {
             ui.horizontal_centered(|ui| {
@@ -3783,7 +4036,7 @@ impl App {
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 };
-                if seg(ui, "Data", depth == 0) {
+                if seg(ui, &tail_str(&root_label, 24), depth == 0) {
                     go_to = Some(0);
                 }
                 for i in 0..depth {
@@ -3792,7 +4045,7 @@ impl App {
                             .font(theme::mono(10.5))
                             .color(palette.faint),
                     );
-                    let name = self.crumbs[i].name.clone();
+                    let name = crumbs[i].name.clone();
                     if seg(ui, &tail_str(&name, 28), i + 1 == depth) {
                         go_to = Some(i + 1);
                     }
@@ -3855,12 +4108,24 @@ impl App {
             self.open_storage_search();
         }
         if let Some(d) = go_to {
-            self.crumbs.truncate(d);
-            self.view = self.crumbs.last().cloned();
-            self.zoom = None;
+            crumbs.truncate(d);
+            view = crumbs.last().cloned();
+            zoom_state = None;
         }
 
-        let Some(node) = self.view_node() else {
+        if disconnected {
+            ui.painter().text(
+                map_rect.center(),
+                Align2::CENTER_CENTER,
+                "Drive disconnected\nRefresh drives and scan again",
+                theme::body(13.0),
+                palette.caution,
+            );
+            self.store_map_navigation(source, view, crumbs, zoom_state);
+            return;
+        }
+
+        let Some(node) = view.clone().or(root) else {
             ui.painter().text(
                 map_rect.center(),
                 Align2::CENTER_CENTER,
@@ -3868,12 +4133,13 @@ impl App {
                 theme::body(13.0),
                 palette.faint,
             );
+            self.store_map_navigation(source, view, crumbs, zoom_state);
             return;
         };
 
         let items = treemap::collect_items(&node);
         if items.is_empty() {
-            let msg = if self.scanning() {
+            let msg = if scanning {
                 "Mapping storage…"
             } else {
                 "Nothing to show"
@@ -3885,11 +4151,12 @@ impl App {
                 theme::body(13.0),
                 palette.faint,
             );
+            self.store_map_navigation(source, view, crumbs, zoom_state);
             return;
         }
         let laid = treemap::squarify(&items, map_rect);
 
-        let zoom = self.zoom.and_then(|(src, t0)| {
+        let zoom = zoom_state.and_then(|(src, t0)| {
             let t = t0.elapsed().as_secs_f32() / ZOOM_SECS;
             if t >= 1.0 {
                 None
@@ -3898,7 +4165,7 @@ impl App {
             }
         });
         if zoom.is_none() {
-            self.zoom = None;
+            zoom_state = None;
         }
 
         let interactions_enabled =
@@ -3926,15 +4193,20 @@ impl App {
                 },
             );
             let item_node = item.node.clone();
-            let offload_block = item_node
-                .as_ref()
-                .and_then(|node| classify_movable(&strip_data_root(&node.path), &home).err());
+            let offload_block = capabilities
+                .allow_offload
+                .then(|| {
+                    item_node.as_ref().and_then(|node| {
+                        classify_movable(&strip_data_root(&node.path), &home).err()
+                    })
+                })
+                .flatten();
             let actions = map_item_actions(
                 item.is_dir,
                 item.synthetic,
                 item.denied,
                 item.node.is_some(),
-                offload_block.is_none(),
+                capabilities.allow_offload && offload_block.is_none(),
             );
 
             let primary_clicked = response.clicked();
@@ -3973,19 +4245,21 @@ impl App {
                             .map(|node| MapActionRequest::Reveal(node.path.clone()));
                         menu_ui.close_menu();
                     }
-                    menu_ui.separator();
-                    let mut move_response =
-                        menu_ui.add_enabled(actions.move_to_ssd, egui::Button::new("Move to SSD…"));
-                    if let Some(block) = offload_block {
-                        move_response = move_response.on_disabled_hover_text(block.message());
-                    }
-                    if move_response.clicked() {
-                        requested_action =
-                            item_node.as_ref().map(|node| MapActionRequest::MoveToSsd {
-                                path: strip_data_root(&node.path),
-                                bytes: node.bytes(),
-                            });
-                        menu_ui.close_menu();
+                    if capabilities.allow_offload {
+                        menu_ui.separator();
+                        let mut move_response = menu_ui
+                            .add_enabled(actions.move_to_ssd, egui::Button::new("Move to SSD…"));
+                        if let Some(block) = offload_block {
+                            move_response = move_response.on_disabled_hover_text(block.message());
+                        }
+                        if move_response.clicked() {
+                            requested_action =
+                                item_node.as_ref().map(|node| MapActionRequest::MoveToSsd {
+                                    path: strip_data_root(&node.path),
+                                    bytes: node.bytes(),
+                                });
+                            menu_ui.close_menu();
+                        }
                     }
                 });
                 menu_open |= response.context_menu_opened();
@@ -4042,25 +4316,32 @@ impl App {
 
         match requested_action {
             Some(MapActionRequest::Open { node, source }) => {
-                self.crumbs.push(node.clone());
-                self.view = Some(node);
-                self.zoom = Some((source, Instant::now()));
+                crumbs.push(node.clone());
+                view = Some(node);
+                zoom_state = Some((source, Instant::now()));
             }
-            Some(MapActionRequest::Reveal(path)) => reveal_in_finder(&path),
+            Some(MapActionRequest::Reveal(path)) => {
+                if source == MapSource::Internal || self.external_path_actions_available() {
+                    reveal_in_finder(&path);
+                }
+            }
             Some(MapActionRequest::MoveToSsd { path, bytes }) => {
-                self.open_offload_dialog(path, bytes);
+                if capabilities.allow_offload {
+                    self.open_offload_dialog(path, bytes);
+                }
             }
             None => {}
         }
 
         let escape_pressed = ui.input(|input| input.key_pressed(egui::Key::Escape));
         if should_navigate_back_on_escape(escape_pressed, menu_was_open, menu_open) {
-            if let Some(target) = back_target(self.crumbs.len()) {
-                self.crumbs.truncate(target);
-                self.view = self.crumbs.last().cloned();
-                self.zoom = None;
+            if let Some(target) = back_target(crumbs.len()) {
+                crumbs.truncate(target);
+                view = crumbs.last().cloned();
+                zoom_state = None;
             }
         }
+        self.store_map_navigation(source, view, crumbs, zoom_state);
     }
 
     fn draw_recs(&mut self, ui: &mut egui::Ui, rect: Rect) {
@@ -7213,10 +7494,19 @@ impl App {
         let Some(mut dialog) = self.search_dialog.take() else {
             return;
         };
-        let Some(root) = self.scan.as_ref().and_then(|scan| {
-            (scan.state() == ScanState::Done && dialog.scan_revision == self.recs_revision)
-                .then(|| scan.root.clone())
-        }) else {
+        let root = match dialog.source {
+            MapSource::Internal => self.scan.as_ref().and_then(|scan| {
+                (scan.state() == ScanState::Done && dialog.scan_revision == self.recs_revision)
+                    .then(|| scan.root.clone())
+            }),
+            MapSource::External => self.external_session.as_ref().and_then(|session| {
+                (session.scan.state() == ScanState::Done
+                    && !session.disconnected
+                    && dialog.scan_revision == session.revision)
+                    .then(|| session.scan.root.clone())
+            }),
+        };
+        let Some(root) = root else {
             return;
         };
 
@@ -7501,9 +7791,15 @@ impl App {
         if !window_open || close_requested {
             return;
         }
+        if requested.is_some()
+            && dialog.source == MapSource::External
+            && !self.external_path_actions_available()
+        {
+            return;
+        }
         match requested {
             Some((SearchAction::OpenMap, node)) => {
-                if !self.open_search_folder(&root, node) {
+                if !self.open_search_folder(dialog.source, &root, node) {
                     self.search_dialog = Some(dialog);
                 }
             }
