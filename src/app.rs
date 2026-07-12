@@ -311,6 +311,10 @@ fn active_map_source(rail_view: RailView, has_external_session: bool) -> MapSour
     }
 }
 
+fn should_monitor_external_mount(rail_view: RailView, has_external_session: bool) -> bool {
+    rail_view == RailView::External && has_external_session
+}
+
 struct SearchDialog {
     query: String,
     summary: SearchSummary,
@@ -394,6 +398,7 @@ fn escape_target(
     search_open: bool,
     trash_restore_open: bool,
     moved_restore_open: bool,
+    map_menu_open: bool,
     rail_target: Option<RailView>,
 ) -> EscapeTarget {
     if search_open {
@@ -402,6 +407,8 @@ fn escape_target(
         EscapeTarget::TrashRestore
     } else if moved_restore_open {
         EscapeTarget::MovedRestore
+    } else if map_menu_open {
+        EscapeTarget::None
     } else if let Some(target) = rail_target {
         EscapeTarget::Rail(target)
     } else {
@@ -478,6 +485,7 @@ pub struct App {
     file_review: Option<ReviewResult>,
     file_review_error: Option<String>,
     search_dialog: Option<SearchDialog>,
+    map_menu_open: bool,
     external_volumes: Vec<MountedVolume>,
     external_session: Option<ExternalSession>,
     external_revision: u64,
@@ -852,6 +860,7 @@ impl App {
             file_review: None,
             file_review_error: None,
             search_dialog: None,
+            map_menu_open: false,
             external_volumes: Vec::new(),
             external_session: None,
             external_revision: 0,
@@ -2451,22 +2460,30 @@ mod tests {
     #[test]
     fn storage_search_escape_has_priority_over_every_navigation_layer() {
         assert_eq!(
-            escape_target(true, true, true, Some(RailView::Insights)),
+            escape_target(true, true, true, false, Some(RailView::Insights)),
             EscapeTarget::Search
         );
         assert_eq!(
-            escape_target(false, true, true, Some(RailView::Insights)),
+            escape_target(false, true, true, false, Some(RailView::Insights)),
             EscapeTarget::TrashRestore
         );
         assert_eq!(
-            escape_target(false, false, true, Some(RailView::Insights)),
+            escape_target(false, false, true, false, Some(RailView::Insights)),
             EscapeTarget::MovedRestore
         );
         assert_eq!(
-            escape_target(false, false, false, Some(RailView::Insights)),
+            escape_target(false, false, false, false, Some(RailView::Insights)),
             EscapeTarget::Rail(RailView::Insights)
         );
-        assert_eq!(escape_target(false, false, false, None), EscapeTarget::None);
+        assert_eq!(
+            escape_target(false, false, false, false, None),
+            EscapeTarget::None
+        );
+        assert_eq!(
+            escape_target(false, false, false, true, Some(RailView::Insights)),
+            EscapeTarget::None,
+            "an open map menu must receive Escape before rail navigation"
+        );
     }
 
     #[test]
@@ -3036,6 +3053,14 @@ mod tests {
     }
 
     #[test]
+    fn external_mount_monitor_runs_only_while_its_workspace_is_visible() {
+        assert!(should_monitor_external_mount(RailView::External, true));
+        assert!(!should_monitor_external_mount(RailView::External, false));
+        assert!(!should_monitor_external_mount(RailView::Insights, true));
+        assert!(!should_monitor_external_mount(RailView::Summary, true));
+    }
+
+    #[test]
     fn external_mount_revalidation_fails_closed() {
         use crate::volumes::MountedVolume;
         use std::path::PathBuf;
@@ -3414,6 +3439,7 @@ impl eframe::App for App {
             self.search_dialog.is_some(),
             self.trash_restore_dialog.is_some(),
             self.restore_dialog.is_some(),
+            self.map_menu_open,
             (self.dialog.is_none())
                 .then(|| rail_back_target(self.rail_view))
                 .flatten(),
@@ -3475,6 +3501,9 @@ impl eframe::App for App {
             || self.file_review_rx.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(40));
+        }
+        if should_monitor_external_mount(self.rail_view, self.external_session.is_some()) {
+            ctx.request_repaint_after(Duration::from_secs(1));
         }
 
         self.top_bar(ctx);
@@ -3946,6 +3975,7 @@ impl App {
     }
 
     fn draw_map(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        self.map_menu_open = false;
         let palette = theme::palette(ui.ctx());
         let source = active_map_source(self.rail_view, self.external_session.is_some());
         let (
@@ -4341,6 +4371,7 @@ impl App {
                 zoom_state = None;
             }
         }
+        self.map_menu_open = menu_open;
         self.store_map_navigation(source, view, crumbs, zoom_state);
     }
 
@@ -5368,8 +5399,15 @@ impl App {
                     }
 
                     for (index, volume) in volumes.iter().enumerate() {
+                        let session = self.external_session.as_ref().filter(|session| {
+                            is_same_mount(&session.volume, volume)
+                        });
+                        let row_height = 104.0;
                         let row = ui
-                            .allocate_exact_size(vec2(ui.available_width(), 88.0), Sense::hover())
+                            .allocate_exact_size(
+                                vec2(ui.available_width(), row_height),
+                                Sense::hover(),
+                            )
                             .0;
                         let layout = ExternalVolumeRowLayout::from_rect(row.shrink(10.0));
                         ui.painter().rect_filled(
@@ -5382,10 +5420,6 @@ impl App {
                             Rounding::same(10.0),
                             Stroke::new(1.0, palette.edge_soft),
                         );
-
-                        let session = self.external_session.as_ref().filter(|session| {
-                            is_same_mount(&session.volume, volume)
-                        });
                         let connected = session.is_none_or(|session| !session.disconnected);
                         let state = session.map(|session| session.scan.state());
                         let (action_copy, action_enabled) =
@@ -5400,14 +5434,15 @@ impl App {
                         ui.allocate_new_ui(
                             egui::UiBuilder::new().max_rect(layout.content),
                             |ui| {
+                                ui.spacing_mut().item_spacing.y = 0.0;
                                 ui.label(
-                                    RichText::new(tail_str(&volume.name, 28))
+                                    RichText::new(tail_str(&volume.name, 22))
                                         .font(theme::display_md(11.5))
                                         .color(palette.ink),
                                 );
                                 ui.label(
                                     RichText::new(format!(
-                                        "{} · {:.0}% used · {} free",
+                                        "{} · {:.0}% · {} free",
                                         volume.fs_type.to_uppercase(),
                                         used_pct,
                                         fmt_bytes(volume.free_bytes)
@@ -5415,19 +5450,60 @@ impl App {
                                     .font(theme::mono(9.0))
                                     .color(palette.muted),
                                 );
-                                ui.label(
-                                    RichText::new(if volume.read_only {
-                                        "Read-only media · safe to map"
+                                if let Some(session) = session {
+                                    let state = session.scan.state();
+                                    let elapsed = if state == ScanState::Running {
+                                        session.scan.started.elapsed()
                                     } else {
-                                        "Writable local drive · map is still read-only"
-                                    })
-                                    .font(theme::body(8.8))
-                                    .color(if volume.read_only {
-                                        palette.caution
-                                    } else {
-                                        palette.faint
-                                    }),
-                                );
+                                        Duration::from_millis(
+                                            session.scan.duration_ms.load(Relaxed).max(0) as u64,
+                                        )
+                                    };
+                                    let status = ui.label(
+                                        RichText::new(format!(
+                                            "{} · {} · {}",
+                                            if state == ScanState::Running {
+                                                "Mapping"
+                                            } else if state == ScanState::Done {
+                                                "Map complete"
+                                            } else {
+                                                "Map stopped"
+                                            },
+                                            fmt_bytes(session.scan.root.bytes()),
+                                            fmt_elapsed(elapsed)
+                                        ))
+                                        .font(theme::mono(8.5))
+                                        .color(if state == ScanState::Running {
+                                            palette.accent
+                                        } else {
+                                            palette.muted
+                                        }),
+                                    );
+                                    if state == ScanState::Running {
+                                        let current = session
+                                            .scan
+                                            .current
+                                            .lock()
+                                            .ok()
+                                            .map(|value| value.clone())
+                                            .unwrap_or_default();
+                                        status.on_hover_text(current);
+                                    }
+                                } else {
+                                    ui.label(
+                                        RichText::new(if volume.read_only {
+                                            "Read-only media · safe to map"
+                                        } else {
+                                            "Writable · read-only map"
+                                        })
+                                        .font(theme::body(8.8))
+                                        .color(if volume.read_only {
+                                            palette.caution
+                                        } else {
+                                            palette.faint
+                                        }),
+                                    );
+                                }
                             },
                         );
 
@@ -5474,53 +5550,6 @@ impl App {
                             },
                         );
                         ui.add_space(7.0);
-                    }
-
-                    if let Some(session) = self.external_session.as_ref() {
-                        ui.add_space(2.0);
-                        let state = session.scan.state();
-                        let elapsed = if state == ScanState::Running {
-                            session.scan.started.elapsed()
-                        } else {
-                            Duration::from_millis(
-                                session.scan.duration_ms.load(Relaxed).max(0) as u64,
-                            )
-                        };
-                        ui.label(
-                            RichText::new(format!(
-                                "{} · {} items · {} · {}",
-                                if state == ScanState::Running {
-                                    "Mapping"
-                                } else if state == ScanState::Done {
-                                    "Map complete"
-                                } else {
-                                    "Map stopped"
-                                },
-                                fmt_count(session.scan.root.files()),
-                                fmt_bytes(session.scan.root.bytes()),
-                                fmt_elapsed(elapsed)
-                            ))
-                            .font(theme::mono(9.0))
-                            .color(if state == ScanState::Running {
-                                palette.accent
-                            } else {
-                                palette.muted
-                            }),
-                        );
-                        if state == ScanState::Running {
-                            let current = session
-                                .scan
-                                .current
-                                .lock()
-                                .ok()
-                                .map(|value| value.clone())
-                                .unwrap_or_default();
-                            ui.label(
-                                RichText::new(tail_str(&current, 48))
-                                    .font(theme::mono(8.5))
-                                    .color(palette.faint),
-                            );
-                        }
                     }
                 });
         });
