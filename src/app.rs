@@ -8,6 +8,7 @@ use crate::clean::{
 };
 use crate::developer;
 use crate::file_review::{self, ReviewResult};
+use crate::folder_lens::{choose_folder, inspect_folder, is_same_folder, FolderTarget};
 use crate::forecast::{self, Confidence, ForecastState};
 use crate::history::{
     default_history_dir, load_growth_watch, record_scan, set_folder_watched, GrowthSummary,
@@ -43,7 +44,7 @@ use egui::{
     pos2, vec2, Align2, Color32, Context, Frame, Label, Margin, Pos2, Rect, RichText, Rounding,
     Sense, Stroke,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
@@ -256,6 +257,15 @@ struct ExternalSession {
     completion_reported: bool,
 }
 
+struct FolderSession {
+    target: FolderTarget,
+    scan: ScanHandle,
+    navigation: MapNavigation,
+    revision: u64,
+    disconnected: bool,
+    completion_reported: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ExternalVolumeRowLayout {
     content: Rect,
@@ -274,13 +284,29 @@ impl ExternalVolumeRowLayout {
     }
 }
 
-fn can_start_external_scan(
+fn can_start_auxiliary_scan(
     internal_scanning: bool,
     external_scanning: bool,
+    folder_scanning: bool,
+    picker_running: bool,
     mutation_busy: bool,
     file_review_running: bool,
 ) -> bool {
-    !internal_scanning && !external_scanning && !mutation_busy && !file_review_running
+    !internal_scanning
+        && !external_scanning
+        && !folder_scanning
+        && !picker_running
+        && !mutation_busy
+        && !file_review_running
+}
+
+fn folder_drop_path(paths: &[Option<PathBuf>]) -> Result<PathBuf, &'static str> {
+    if paths.len() != 1 {
+        return Err("Drop exactly one Finder folder.");
+    }
+    paths[0]
+        .clone()
+        .ok_or("That drop does not contain a local folder path.")
 }
 
 fn external_session_connected(expected: &MountedVolume, current: Option<&MountedVolume>) -> bool {
@@ -491,6 +517,10 @@ pub struct App {
     external_volumes: Vec<MountedVolume>,
     external_session: Option<ExternalSession>,
     external_revision: u64,
+    folder_picker_rx: Option<Receiver<Result<Option<PathBuf>, String>>>,
+    folder_session: Option<FolderSession>,
+    folder_error: Option<String>,
+    folder_revision: u64,
 }
 
 fn now_hms() -> String {
@@ -866,6 +896,10 @@ impl App {
             external_volumes: Vec::new(),
             external_session: None,
             external_revision: 0,
+            folder_picker_rx: None,
+            folder_session: None,
+            folder_error: None,
+            folder_revision: 0,
         }
     }
 
@@ -881,10 +915,10 @@ impl App {
     }
 
     fn begin_scan(&mut self) {
-        if self.external_scanning() {
+        if self.external_scanning() || self.folder_scanning() || self.folder_picker_rx.is_some() {
             self.ops(
                 OpsKind::Amber,
-                "stop the external scan before rescanning Macintosh HD",
+                "finish the focused read-only scan before rescanning Macintosh HD",
             );
             return;
         }
@@ -924,6 +958,12 @@ impl App {
             .is_some_and(|session| session.scan.state() == ScanState::Running)
     }
 
+    fn folder_scanning(&self) -> bool {
+        self.folder_session
+            .as_ref()
+            .is_some_and(|session| session.scan.state() == ScanState::Running)
+    }
+
     fn refresh_external_volumes(&mut self) {
         self.external_volumes = mounted_external_volumes();
         let connected = self.external_session.as_ref().map(|session| {
@@ -944,9 +984,11 @@ impl App {
     }
 
     fn begin_external_scan(&mut self, volume_index: usize) {
-        if !can_start_external_scan(
+        if !can_start_auxiliary_scan(
             self.scanning(),
             self.external_scanning(),
+            self.folder_scanning(),
+            self.folder_picker_rx.is_some(),
             self.mutation_busy(),
             self.file_review_rx.is_some(),
         ) {
@@ -970,6 +1012,8 @@ impl App {
         }
         self.external_revision = self.external_revision.wrapping_add(1);
         invalidate_storage_search(&mut self.search_dialog);
+        self.folder_session = None;
+        self.folder_error = None;
         let scan = start_scan(expected.mount_path.clone());
         let name = expected.name.clone();
         self.external_session = Some(ExternalSession {
@@ -1029,6 +1073,182 @@ impl App {
                 }
             ),
         );
+    }
+
+    fn begin_folder_picker(&mut self) {
+        if !can_start_auxiliary_scan(
+            self.scanning(),
+            self.external_scanning(),
+            self.folder_scanning(),
+            self.folder_picker_rx.is_some(),
+            self.mutation_busy(),
+            self.file_review_rx.is_some(),
+        ) {
+            self.folder_error =
+                Some("Finish the active scan or file operation before choosing a folder.".into());
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("folder-picker".into())
+            .spawn(move || {
+                let _ = tx.send(choose_folder());
+            }) {
+            Ok(_) => {
+                self.folder_picker_rx = Some(rx);
+                self.folder_error = None;
+            }
+            Err(error) => {
+                let message = format!("start folder chooser: {error}");
+                self.folder_error = Some(message.clone());
+                self.ops(
+                    OpsKind::Amber,
+                    format!("Folder Lens unavailable — {message}"),
+                );
+            }
+        }
+    }
+
+    fn poll_folder_picker(&mut self) {
+        let result = match self.folder_picker_rx.as_ref().map(Receiver::try_recv) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Some(Err("folder chooser stopped before reporting".into()))
+            }
+        };
+        self.folder_picker_rx = None;
+        match result.expect("folder picker result") {
+            Ok(Some(path)) => self.begin_folder_scan(path),
+            Ok(None) => self.folder_error = None,
+            Err(error) => {
+                self.folder_error = Some(error.clone());
+                self.ops(OpsKind::Amber, format!("Folder Lens unavailable — {error}"));
+            }
+        }
+    }
+
+    fn begin_folder_scan(&mut self, path: PathBuf) {
+        if !can_start_auxiliary_scan(
+            self.scanning(),
+            self.external_scanning(),
+            self.folder_scanning(),
+            self.folder_picker_rx.is_some(),
+            self.mutation_busy(),
+            self.file_review_rx.is_some(),
+        ) {
+            self.folder_error =
+                Some("Finish the active scan or file operation before scanning a folder.".into());
+            return;
+        }
+        let target = match inspect_folder(&path) {
+            Ok(target) => target,
+            Err(block) => {
+                self.folder_error = Some(block.message().into());
+                return;
+            }
+        };
+        self.folder_revision = self.folder_revision.wrapping_add(1);
+        invalidate_storage_search(&mut self.search_dialog);
+        self.external_session = None;
+        let scan = start_scan(target.path.clone());
+        let name = target.name.clone();
+        self.folder_session = Some(FolderSession {
+            target,
+            scan,
+            navigation: MapNavigation::default(),
+            revision: self.folder_revision,
+            disconnected: false,
+            completion_reported: false,
+        });
+        self.folder_error = None;
+        self.ops(
+            OpsKind::Info,
+            format!("folder scan initiated — {name} (read-only)"),
+        );
+    }
+
+    fn poll_folder_scan(&mut self) {
+        let report = self.folder_session.as_ref().and_then(|session| {
+            if session.completion_reported || session.scan.state() == ScanState::Running {
+                return None;
+            }
+            Some((
+                session.scan.state(),
+                session.target.name.clone(),
+                session.scan.root.files(),
+                session.scan.root.bytes(),
+                session.scan.denied.load(Relaxed),
+                session.scan.duration_ms.load(Relaxed),
+            ))
+        });
+        let Some((state, name, files, bytes, denied, duration_ms)) = report else {
+            return;
+        };
+        if let Some(session) = &mut self.folder_session {
+            session.completion_reported = true;
+        }
+        self.ops(
+            if state == ScanState::Done {
+                OpsKind::Ok
+            } else {
+                OpsKind::Amber
+            },
+            format!(
+                "folder scan {} — {name}: {} items, {} mapped in {}{}",
+                if state == ScanState::Done {
+                    "complete"
+                } else {
+                    "stopped"
+                },
+                fmt_count(files),
+                fmt_bytes(bytes),
+                fmt_elapsed(Duration::from_millis(duration_ms.max(0) as u64)),
+                if denied > 0 {
+                    format!(" · {denied} no access")
+                } else {
+                    String::new()
+                }
+            ),
+        );
+    }
+
+    fn refresh_folder_identity(&mut self) -> bool {
+        let Some((expected, was_disconnected)) = self
+            .folder_session
+            .as_ref()
+            .map(|session| (session.target.clone(), session.disconnected))
+        else {
+            return false;
+        };
+        match inspect_folder(&expected.path) {
+            Ok(current) if is_same_folder(&expected, &current) => {
+                if let Some(session) = &mut self.folder_session {
+                    session.target.total_bytes = current.total_bytes;
+                    session.target.free_bytes = current.free_bytes;
+                    session.target.read_only = current.read_only;
+                    session.disconnected = false;
+                }
+                true
+            }
+            _ => {
+                if let Some(session) = &mut self.folder_session {
+                    session.disconnected = true;
+                    session.scan.cancel.store(true, Relaxed);
+                }
+                invalidate_storage_search(&mut self.search_dialog);
+                if !was_disconnected {
+                    self.folder_error = Some(
+                        "That folder changed or is no longer available. Choose it again.".into(),
+                    );
+                    self.ops(
+                        OpsKind::Amber,
+                        "folder changed or became unavailable — choose it again",
+                    );
+                }
+                false
+            }
+        }
     }
 
     fn confirmation_dialog_open(&self) -> bool {
@@ -3129,12 +3349,41 @@ mod tests {
     }
 
     #[test]
-    fn external_volume_scan_requires_a_completely_idle_workspace() {
-        assert!(can_start_external_scan(false, false, false, false));
-        assert!(!can_start_external_scan(true, false, false, false));
-        assert!(!can_start_external_scan(false, true, false, false));
-        assert!(!can_start_external_scan(false, false, true, false));
-        assert!(!can_start_external_scan(false, false, false, true));
+    fn auxiliary_scan_gate_allows_exactly_one_idle_read_only_session() {
+        assert!(can_start_auxiliary_scan(
+            false, false, false, false, false, false
+        ));
+        assert!(!can_start_auxiliary_scan(
+            true, false, false, false, false, false
+        ));
+        assert!(!can_start_auxiliary_scan(
+            false, true, false, false, false, false
+        ));
+        assert!(!can_start_auxiliary_scan(
+            false, false, true, false, false, false
+        ));
+        assert!(!can_start_auxiliary_scan(
+            false, false, false, true, false, false
+        ));
+        assert!(!can_start_auxiliary_scan(
+            false, false, false, false, true, false
+        ));
+        assert!(!can_start_auxiliary_scan(
+            false, false, false, false, false, true
+        ));
+    }
+
+    #[test]
+    fn folder_drop_requires_exactly_one_path() {
+        use std::path::PathBuf;
+
+        assert!(folder_drop_path(&[]).is_err());
+        assert!(folder_drop_path(&[Some(PathBuf::from("/a")), Some(PathBuf::from("/b"))]).is_err());
+        assert!(folder_drop_path(&[None]).is_err());
+        assert_eq!(
+            folder_drop_path(&[Some(PathBuf::from("/fixture"))]).unwrap(),
+            PathBuf::from("/fixture")
+        );
     }
 
     #[test]
@@ -3516,6 +3765,8 @@ impl eframe::App for App {
         self.poll_leftovers();
         self.poll_file_review();
         self.poll_external_scan();
+        self.poll_folder_picker();
+        self.poll_folder_scan();
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
             self.open_storage_search();
         }
@@ -3562,6 +3813,7 @@ impl eframe::App for App {
         self.update_menu_monitor();
         if self.scanning()
             || self.external_scanning()
+            || self.folder_scanning()
             || self.cleaning
             || self.zoom.is_some()
             || self
@@ -3586,6 +3838,9 @@ impl eframe::App for App {
             || self.file_review_rx.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(40));
+        }
+        if self.folder_picker_rx.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(250));
         }
         if should_monitor_external_mount(self.rail_view, self.external_session.is_some()) {
             ctx.request_repaint_after(Duration::from_secs(1));
@@ -3633,9 +3888,11 @@ impl App {
                     )
                 }
             };
-        let external_can_start = can_start_external_scan(
+        let external_can_start = can_start_auxiliary_scan(
             self.scanning(),
             self.external_scanning(),
+            self.folder_scanning(),
+            self.folder_picker_rx.is_some(),
             self.mutation_busy(),
             self.file_review_rx.is_some(),
         );
@@ -5682,9 +5939,11 @@ impl App {
         let external_scanning = self.external_scanning();
         let mutation_busy = self.mutation_busy();
         let file_review_running = self.file_review_rx.is_some();
-        let can_start = can_start_external_scan(
+        let can_start = can_start_auxiliary_scan(
             internal_scanning,
             external_scanning,
+            self.folder_scanning(),
+            self.folder_picker_rx.is_some(),
             mutation_busy,
             file_review_running,
         );
