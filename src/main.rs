@@ -15,6 +15,7 @@ mod reclaim_history;
 mod reclaim_plan;
 mod rules;
 mod scan;
+mod search;
 mod theme;
 mod transfer;
 mod treemap;
