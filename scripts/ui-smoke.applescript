@@ -163,6 +163,8 @@ on run argv
                 click button "Developer Lens" of appGroup
                 delay 0.5
                 if not (exists button "← Insights" of appGroup) then error "Developer Lens rail did not open." number 1
+                if not (exists static text "DEVELOPER WORKSPACE" of appGroup) then error "Developer Deep Dive workspace is unavailable." number 1
+                if not (exists button "Refresh" of appGroup) then error "Developer Deep Dive Refresh control is unavailable." number 1
                 return "PASS: Developer Lens rail available"
             else if commandName is "apfs-accounting-visible" then
                 my openInsights(appGroup)

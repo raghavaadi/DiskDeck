@@ -69,6 +69,85 @@ enum OpsKind {
     Amber,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeveloperWorkspaceState {
+    WaitingForScan,
+    Loading,
+    Empty,
+    Partial,
+    DockerUnavailable,
+    Populated,
+    Failed,
+}
+
+fn developer_workspace_state(
+    report: Option<&developer::DeveloperReport>,
+    loading: bool,
+    error: Option<&str>,
+    scan_ready: bool,
+) -> DeveloperWorkspaceState {
+    if !scan_ready {
+        DeveloperWorkspaceState::WaitingForScan
+    } else if loading {
+        DeveloperWorkspaceState::Loading
+    } else if error.is_some() {
+        DeveloperWorkspaceState::Failed
+    } else if let Some(report) = report {
+        if report.sections.is_empty() {
+            DeveloperWorkspaceState::Empty
+        } else if report.docker.unavailable.is_some() {
+            DeveloperWorkspaceState::DockerUnavailable
+        } else if report.sections.len() >= 3 {
+            DeveloperWorkspaceState::Populated
+        } else {
+            DeveloperWorkspaceState::Partial
+        }
+    } else {
+        DeveloperWorkspaceState::Empty
+    }
+}
+
+fn developer_workspace_copy(state: DeveloperWorkspaceState) -> &'static str {
+    match state {
+        DeveloperWorkspaceState::WaitingForScan => {
+            "Complete the foreground scan to inspect developer storage."
+        }
+        DeveloperWorkspaceState::Loading => {
+            "Reading retained scan evidence and fixed read-only tool output…"
+        }
+        DeveloperWorkspaceState::Empty => {
+            "No developer storage passed the bounded evidence checks."
+        }
+        DeveloperWorkspaceState::Partial => {
+            "Developer evidence is available from part of this Mac."
+        }
+        DeveloperWorkspaceState::DockerUnavailable => {
+            "Measured storage is available; Docker's inside-VM detail is unavailable."
+        }
+        DeveloperWorkspaceState::Populated => {
+            "Developer storage is grouped by source with overlap-safe totals."
+        }
+        DeveloperWorkspaceState::Failed => "Developer workspace could not be loaded.",
+    }
+}
+
+fn should_start_developer_worker(
+    opening_developer_lens: bool,
+    scan_ready: bool,
+    worker_running: bool,
+    has_report: bool,
+) -> bool {
+    opening_developer_lens && scan_ready && !worker_running && !has_report
+}
+
+fn invalidate_developer_workspace(
+    report: &mut Option<developer::DeveloperReport>,
+    error: &mut Option<String>,
+) {
+    *report = None;
+    *error = None;
+}
+
 struct OpsLine {
     time: String,
     text: String,
@@ -164,6 +243,9 @@ pub struct App {
     growth_watch_rx: Option<Receiver<Result<GrowthWatch, String>>>,
     growth_watch: GrowthWatch,
     growth_watch_error: Option<String>,
+    developer_rx: Option<Receiver<Result<developer::DeveloperReport, String>>>,
+    developer_report: Option<developer::DeveloperReport>,
+    developer_error: Option<String>,
     apfs_rx: Option<Receiver<Result<ApfsAccounting, String>>>,
     apfs: Option<ApfsAccounting>,
     apfs_error: Option<String>,
@@ -285,6 +367,173 @@ fn draw_growth_sparkline(ui: &egui::Ui, rect: Rect, points: &[TimelinePoint]) {
     );
 }
 
+fn developer_tier_copy(tier: developer::EvidenceTier) -> &'static str {
+    match tier {
+        developer::EvidenceTier::Safe => "Safe rule",
+        developer::EvidenceTier::Caution => "Caution · never preselected",
+    }
+}
+
+fn draw_developer_finding(
+    ui: &mut egui::Ui,
+    finding: &developer::DeepFinding,
+) -> Option<std::path::PathBuf> {
+    let palette = theme::palette(ui.ctx());
+    let mut reveal = None;
+    Frame::none()
+        .fill(palette.surface_raised)
+        .stroke(Stroke::new(1.0, palette.edge_soft))
+        .rounding(Rounding::same(8.0))
+        .inner_margin(Margin::symmetric(9.0, 8.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if let Some(project) = &finding.project_root {
+                ui.label(
+                    RichText::new(format!(
+                        "PROJECT · {}",
+                        tail_str(&rules::display(project), 36)
+                    ))
+                    .font(theme::mono(8.0))
+                    .color(palette.accent),
+                );
+            }
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(tail_str(&finding.title, 28))
+                        .font(theme::display_md(10.5))
+                        .color(palette.ink),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(fmt_bytes(finding.bytes))
+                            .font(theme::mono(9.5))
+                            .color(palette.muted),
+                    );
+                });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(finding.rebuild_cost.label())
+                        .font(theme::body(8.5))
+                        .color(palette.muted),
+                );
+                if let Some(tier) = finding.evidence.tier {
+                    ui.label(
+                        RichText::new(format!("· {}", developer_tier_copy(tier)))
+                            .font(theme::body(8.5))
+                            .color(if tier == developer::EvidenceTier::Caution {
+                                palette.caution
+                            } else {
+                                palette.safe
+                            }),
+                    );
+                }
+                if finding.evidence.estimated {
+                    ui.label(
+                        RichText::new("· Upper-bound estimate")
+                            .font(theme::body(8.5))
+                            .color(palette.caution),
+                    );
+                }
+                if !finding.counted {
+                    ui.label(
+                        RichText::new("· Not added to total")
+                            .font(theme::body(8.5))
+                            .color(palette.caution),
+                    );
+                }
+            });
+            egui::CollapsingHeader::new(
+                RichText::new("Evidence")
+                    .font(theme::mono(8.5))
+                    .color(palette.accent),
+            )
+            .id_salt((
+                "developer-evidence",
+                finding.evidence.source_rec_id.as_deref(),
+                &finding.evidence.measured_path,
+            ))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(&finding.evidence.display_path)
+                        .font(theme::mono(8.0))
+                        .color(palette.faint),
+                );
+                ui.label(
+                    RichText::new(&finding.evidence.explanation)
+                        .font(theme::body(8.5))
+                        .color(palette.muted),
+                );
+                ui.label(
+                    RichText::new(format!("Recovery: {}", finding.evidence.recovery))
+                        .font(theme::body(8.5))
+                        .color(palette.muted),
+                );
+                if let Some(overlap) = &finding.evidence.overlap {
+                    ui.label(
+                        RichText::new(format!("Overlap: {overlap}"))
+                            .font(theme::body(8.5))
+                            .color(palette.caution),
+                    );
+                }
+                if let Some(command) = finding.evidence.command {
+                    ui.label(
+                        RichText::new(format!("Vetted cleanup command (display only): {command}"))
+                            .font(theme::mono(8.0))
+                            .color(palette.faint),
+                    );
+                }
+                if ui
+                    .button(RichText::new("Reveal in Finder").font(theme::mono(8.5)))
+                    .clicked()
+                {
+                    reveal = Some(strip_data_root(&finding.evidence.measured_path));
+                }
+            });
+        });
+    reveal
+}
+
+fn draw_docker_detail(ui: &mut egui::Ui, detail: &developer::DockerDetail) {
+    let palette = theme::palette(ui.ctx());
+    Frame::none()
+        .fill(palette.surface_raised)
+        .stroke(Stroke::new(1.0, palette.edge_soft))
+        .rounding(Rounding::same(8.0))
+        .inner_margin(Margin::symmetric(9.0, 7.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(&detail.title)
+                        .font(theme::display_md(10.0))
+                        .color(palette.ink),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(fmt_bytes(detail.bytes))
+                            .font(theme::mono(9.0))
+                            .color(palette.muted),
+                    );
+                });
+            });
+            ui.label(
+                RichText::new(format!(
+                    "{} · Docker reports {} reclaimable",
+                    detail.rebuild_cost.label(),
+                    fmt_bytes(detail.reclaimable_bytes)
+                ))
+                .font(theme::body(8.5))
+                .color(palette.muted),
+            );
+            ui.label(
+                RichText::new(&detail.explanation)
+                    .font(theme::body(8.5))
+                    .color(palette.caution),
+            );
+        });
+}
+
 impl App {
     pub fn new() -> Self {
         let stats = disk_stats();
@@ -349,6 +598,9 @@ impl App {
             growth_watch_rx: None,
             growth_watch: GrowthWatch::default(),
             growth_watch_error: None,
+            developer_rx: None,
+            developer_report: None,
+            developer_error: None,
             apfs_rx: None,
             apfs: None,
             apfs_error: None,
@@ -394,6 +646,8 @@ impl App {
         self.history_rx = None;
         self.regrowth = None;
         self.history_baseline = false;
+        self.developer_rx = None;
+        invalidate_developer_workspace(&mut self.developer_report, &mut self.developer_error);
         self.ops(
             OpsKind::Info,
             "scan initiated — sweeping /System/Volumes/Data (read-only)",
@@ -604,6 +858,88 @@ impl App {
                 self.ops(
                     OpsKind::Amber,
                     format!("Growth Watch unavailable — {error}"),
+                );
+            }
+        }
+    }
+
+    fn developer_scan_ready(&self) -> bool {
+        self.recs_built
+            && self
+                .scan
+                .as_ref()
+                .is_some_and(|scan| scan.state() == ScanState::Done)
+    }
+
+    fn begin_developer_refresh(&mut self, force: bool) {
+        if !should_start_developer_worker(
+            force || self.rail_view == RailView::Developer,
+            self.developer_scan_ready(),
+            self.developer_rx.is_some(),
+            self.developer_report.is_some() && !force,
+        ) {
+            return;
+        }
+        let Some(root) = self.scan.as_ref().map(|scan| scan.root.clone()) else {
+            self.developer_error = Some("Completed scan evidence is unavailable".into());
+            return;
+        };
+        let Some(home) = std::env::var_os("HOME") else {
+            self.developer_error = Some("Home folder is unavailable".into());
+            return;
+        };
+        let home_data = std::path::PathBuf::from(format!(
+            "{DATA_ROOT}{}",
+            std::path::PathBuf::from(home).to_string_lossy()
+        ));
+        let recs: Vec<Rec> = self.recs.iter().map(|row| row.rec.clone()).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("developer-deep-dive".into())
+            .spawn(move || {
+                let docker = developer::load_docker_breakdown();
+                let report = developer::build_report_with_inventory(
+                    &recs,
+                    docker,
+                    &root,
+                    &home_data,
+                    |project, marker| strip_data_root(project).join(marker).is_file(),
+                );
+                let _ = tx.send(Ok(report));
+            }) {
+            Ok(_) => {
+                self.developer_rx = Some(rx);
+                self.developer_error = None;
+                if force {
+                    self.developer_report = None;
+                }
+            }
+            Err(error) => {
+                self.developer_error = Some(format!("start Developer Deep Dive: {error}"));
+            }
+        }
+    }
+
+    fn poll_developer(&mut self) {
+        let result = match self.developer_rx.as_ref().map(Receiver::try_recv) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => Some(Err(
+                "Developer Deep Dive worker stopped before reporting".into(),
+            )),
+        };
+        self.developer_rx = None;
+        match result.unwrap() {
+            Ok(report) => {
+                self.developer_report = Some(report);
+                self.developer_error = None;
+            }
+            Err(error) => {
+                self.developer_report = None;
+                self.developer_error = Some(error.clone());
+                self.ops(
+                    OpsKind::Amber,
+                    format!("Developer Deep Dive unavailable — {error}"),
                 );
             }
         }
@@ -1484,6 +1820,103 @@ mod tests {
     }
 
     #[test]
+    fn developer_workspace_states_cover_waiting_loading_empty_partial_and_error() {
+        assert_eq!(
+            developer_workspace_state(None, false, None, false),
+            DeveloperWorkspaceState::WaitingForScan
+        );
+        assert_eq!(
+            developer_workspace_state(None, true, None, true),
+            DeveloperWorkspaceState::Loading
+        );
+        assert_eq!(
+            developer_workspace_state(None, false, Some("worker stopped"), true),
+            DeveloperWorkspaceState::Failed
+        );
+
+        let empty = developer::DeveloperReport::default();
+        assert_eq!(
+            developer_workspace_state(Some(&empty), false, None, true),
+            DeveloperWorkspaceState::Empty
+        );
+
+        let mut partial = developer::DeveloperReport::default();
+        partial.sections.push(developer::DeveloperSectionReport {
+            section: developer::DeveloperSection::Projects,
+            measured_bytes: 10,
+            findings: Vec::new(),
+        });
+        assert_eq!(
+            developer_workspace_state(Some(&partial), false, None, true),
+            DeveloperWorkspaceState::Partial
+        );
+        partial.docker.unavailable = Some("engine unavailable".into());
+        assert_eq!(
+            developer_workspace_state(Some(&partial), false, None, true),
+            DeveloperWorkspaceState::DockerUnavailable
+        );
+
+        let mut populated = developer::DeveloperReport::default();
+        for section in [
+            developer::DeveloperSection::Docker,
+            developer::DeveloperSection::Xcode,
+            developer::DeveloperSection::Projects,
+        ] {
+            populated.sections.push(developer::DeveloperSectionReport {
+                section,
+                measured_bytes: 10,
+                findings: Vec::new(),
+            });
+        }
+        assert_eq!(
+            developer_workspace_state(Some(&populated), false, None, true),
+            DeveloperWorkspaceState::Populated
+        );
+    }
+
+    #[test]
+    fn developer_workspace_copy_is_plain_and_visible() {
+        assert_eq!(
+            developer_workspace_copy(DeveloperWorkspaceState::WaitingForScan),
+            "Complete the foreground scan to inspect developer storage."
+        );
+        assert_eq!(
+            developer_workspace_copy(DeveloperWorkspaceState::Loading),
+            "Reading retained scan evidence and fixed read-only tool output…"
+        );
+        assert_eq!(
+            developer_workspace_copy(DeveloperWorkspaceState::Empty),
+            "No developer storage passed the bounded evidence checks."
+        );
+        assert_eq!(
+            developer_workspace_copy(DeveloperWorkspaceState::DockerUnavailable),
+            "Measured storage is available; Docker's inside-VM detail is unavailable."
+        );
+        assert_eq!(
+            developer_workspace_copy(DeveloperWorkspaceState::Failed),
+            "Developer workspace could not be loaded."
+        );
+    }
+
+    #[test]
+    fn developer_worker_starts_only_on_an_explicit_ready_open() {
+        assert!(should_start_developer_worker(true, true, false, false));
+        assert!(!should_start_developer_worker(false, true, false, false));
+        assert!(!should_start_developer_worker(true, false, false, false));
+        assert!(!should_start_developer_worker(true, true, true, false));
+        assert!(!should_start_developer_worker(true, true, false, true));
+    }
+
+    #[test]
+    fn new_scan_invalidates_developer_report_and_error() {
+        let mut report = Some(developer::DeveloperReport::default());
+        let mut error = Some("old worker".to_string());
+        invalidate_developer_workspace(&mut report, &mut error);
+        assert!(report.is_none());
+        assert!(error.is_none());
+    }
+
+    #[test]
     fn forecast_confidence_uses_plain_language() {
         assert_eq!(confidence_copy(Confidence::Early), "Early estimate");
         assert_eq!(
@@ -1915,6 +2348,7 @@ impl eframe::App for App {
         self.poll_moves();
         self.poll_restore();
         self.poll_growth_watch();
+        self.poll_developer();
         self.poll_apfs();
         self.poll_leftovers();
         self.poll_file_review();
@@ -1946,6 +2380,7 @@ impl eframe::App for App {
             || self.restoring
             || self.restore_dialog.is_some()
             || self.growth_watch_rx.is_some()
+            || self.developer_rx.is_some()
             || self.apfs_rx.is_some()
             || self.leftovers_rx.is_some()
             || self.file_review_rx.is_some()
@@ -3429,6 +3864,7 @@ impl App {
             match target {
                 RailView::Moved => self.begin_move_refresh(),
                 RailView::Growth => self.begin_growth_refresh(),
+                RailView::Developer => self.begin_developer_refresh(false),
                 RailView::Apfs => self.begin_apfs_refresh(),
                 _ => {}
             }
@@ -3922,69 +4358,166 @@ impl App {
 
     fn draw_developer_lens(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let palette = theme::palette(ui.ctx());
-        let recs: Vec<Rec> = self.recs.iter().map(|row| row.rec.clone()).collect();
-        let groups = developer::analyze(&recs);
-        let total: i64 = groups.iter().map(|group| group.bytes).sum();
-        let meta = if self.recs_built {
-            format!("{} groups · {}", groups.len(), fmt_bytes(total))
-        } else {
-            "waiting for scan".into()
-        };
-        let content = panel_chrome(ui, rect, "Developer Lens", Some((meta, palette.faint)));
+        let report = self.developer_report.clone();
+        let state = developer_workspace_state(
+            report.as_ref(),
+            self.developer_rx.is_some(),
+            self.developer_error.as_deref(),
+            self.developer_scan_ready(),
+        );
+        let meta = report
+            .as_ref()
+            .map(|report| {
+                format!(
+                    "{} sections · {} measured",
+                    report.sections.len(),
+                    fmt_bytes(report.measured_bytes)
+                )
+            })
+            .unwrap_or_else(|| "opt-in · read-only".into());
+        let content = panel_chrome(ui, rect, "Developer Deep Dive", Some((meta, palette.faint)));
         let nav = Rect::from_min_size(
             content.min + vec2(10.0, 4.0),
             vec2(content.width() - 20.0, 30.0),
         );
+        let mut refresh = false;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(nav), |ui| {
-            if ui
-                .add(
-                    egui::Button::new(
-                        RichText::new("← Insights")
-                            .font(theme::display_md(10.5))
-                            .color(palette.accent),
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("← Insights")
+                                .font(theme::display_md(10.5))
+                                .color(palette.accent),
+                        )
+                        .frame(false),
                     )
-                    .frame(false),
-                )
-                .clicked()
-            {
-                self.rail_view = RailView::Insights;
-            }
+                    .clicked()
+                {
+                    self.rail_view = RailView::Insights;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            self.developer_scan_ready() && self.developer_rx.is_none(),
+                            egui::Button::new(RichText::new("Refresh").font(theme::mono(9.0))),
+                        )
+                        .clicked()
+                    {
+                        refresh = true;
+                    }
+                });
+            });
         });
         let list = Rect::from_min_max(
             pos2(content.min.x + 10.0, nav.max.y + 4.0),
             pos2(content.max.x - 10.0, content.max.y - 4.0),
         );
+        let mut reveal = None;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list), |ui| {
-            if !self.recs_built {
-                ui.label(
-                    RichText::new("Developer Lens becomes available after the read-only scan.")
-                        .font(theme::body(10.5))
-                        .color(palette.muted),
-                );
-                return;
-            }
-            if groups.is_empty() {
-                ui.label(
-                    RichText::new(
-                        "No developer-specific reclaim targets were measured in this scan.",
-                    )
-                    .font(theme::body(10.5))
-                    .color(palette.muted),
-                );
-                return;
-            }
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.label(
+                        RichText::new("DEVELOPER WORKSPACE")
+                            .font(theme::display_md(9.5))
+                            .color(palette.accent),
+                    );
+                    ui.label(
+                        RichText::new(developer_workspace_copy(state))
+                            .font(theme::body(9.5))
+                            .color(if state == DeveloperWorkspaceState::Failed {
+                                palette.danger
+                            } else {
+                                palette.muted
+                            }),
+                    );
+                    ui.label(
                         RichText::new(
-                            "Read-only explanation · selections and safety tiers stay in Review targets.",
+                            "Read-only evidence · discovered paths never become cleanup rules · totals exclude overlaps and inside-Docker detail.",
                         )
-                        .font(theme::body(9.5))
+                        .font(theme::body(8.5))
                         .color(palette.faint),
                     );
                     ui.add_space(6.0);
-                    for group in &groups {
+
+                    if let Some(error) = &self.developer_error {
+                        ui.label(
+                            RichText::new(error)
+                                .font(theme::body(9.0))
+                                .color(palette.danger),
+                        );
+                    }
+
+                    let Some(report) = &report else {
+                        return;
+                    };
+                    let docker_section = report
+                        .sections
+                        .iter()
+                        .find(|section| section.section == developer::DeveloperSection::Docker);
+                    Frame::none()
+                        .fill(palette.surface)
+                        .stroke(Stroke::new(1.0, palette.edge_soft))
+                        .rounding(Rounding::same(9.0))
+                        .inner_margin(Margin::symmetric(10.0, 9.0))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Docker")
+                                        .font(theme::display_md(11.0))
+                                        .color(palette.ink),
+                                );
+                                if let Some(section) = docker_section {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "{} measured",
+                                                    fmt_bytes(section.measured_bytes)
+                                                ))
+                                                .font(theme::mono(9.0))
+                                                .color(palette.accent),
+                                            );
+                                        },
+                                    );
+                                }
+                            });
+                            ui.label(
+                                RichText::new(developer::DeveloperSection::Docker.explanation())
+                                    .font(theme::body(8.5))
+                                    .color(palette.muted),
+                            );
+                            if let Some(section) = docker_section {
+                                for finding in &section.findings {
+                                    ui.add_space(5.0);
+                                    if let Some(path) = draw_developer_finding(ui, finding) {
+                                        reveal = Some(path);
+                                    }
+                                }
+                            }
+                            for detail in &report.docker.details {
+                                ui.add_space(5.0);
+                                draw_docker_detail(ui, detail);
+                            }
+                            if let Some(unavailable) = &report.docker.unavailable {
+                                ui.add_space(5.0);
+                                ui.label(
+                                    RichText::new(unavailable)
+                                        .font(theme::body(8.5))
+                                        .color(palette.caution),
+                                );
+                            }
+                        });
+                    ui.add_space(6.0);
+
+                    for section in report
+                        .sections
+                        .iter()
+                        .filter(|section| section.section != developer::DeveloperSection::Docker)
+                    {
                         Frame::none()
                             .fill(palette.surface)
                             .stroke(Stroke::new(1.0, palette.edge_soft))
@@ -3994,7 +4527,7 @@ impl App {
                                 ui.set_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     ui.label(
-                                        RichText::new(group.kind.title())
+                                        RichText::new(section.section.title())
                                             .font(theme::display_md(11.0))
                                             .color(palette.ink),
                                     );
@@ -4002,82 +4535,38 @@ impl App {
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             ui.label(
-                                                RichText::new(fmt_bytes(group.bytes))
-                                                    .font(theme::mono(10.0))
+                                                RichText::new(format!(
+                                                    "{} measured",
+                                                    fmt_bytes(section.measured_bytes)
+                                                ))
+                                                    .font(theme::mono(9.0))
                                                     .color(palette.accent),
                                             );
                                         },
                                     );
                                 });
                                 ui.label(
-                                    RichText::new(group.kind.explanation())
-                                        .font(theme::body(9.5))
+                                    RichText::new(section.section.explanation())
+                                        .font(theme::body(8.5))
                                         .color(palette.muted),
                                 );
-                                ui.add_space(5.0);
-                                for finding in group.findings.iter().take(4) {
-                                    ui.horizontal(|ui| {
-                                        let marker = if finding.caution { "!" } else { "✓" };
-                                        let color = if finding.caution {
-                                            palette.caution
-                                        } else {
-                                            palette.safe
-                                        };
-                                        ui.label(
-                                            RichText::new(marker)
-                                                .font(theme::mono(9.0))
-                                                .color(color),
-                                        );
-                                        ui.vertical(|ui| {
-                                            ui.label(
-                                                RichText::new(tail_str(&finding.title, 27))
-                                                    .font(theme::body(9.5))
-                                                    .color(palette.ink),
-                                            );
-                                            ui.label(
-                                                RichText::new(tail_str(&finding.display, 34))
-                                                    .font(theme::mono(8.5))
-                                                    .color(palette.faint),
-                                            );
-                                        });
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                ui.label(
-                                                    RichText::new(fmt_bytes(finding.bytes))
-                                                        .font(theme::mono(9.0))
-                                                        .color(palette.muted),
-                                                );
-                                            },
-                                        );
-                                    });
-                                    ui.add_space(3.0);
-                                }
-                                if group.findings.len() > 4 {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "+{} more measured target(s)",
-                                            group.findings.len() - 4
-                                        ))
-                                        .font(theme::mono(8.5))
-                                        .color(palette.faint),
-                                    );
-                                }
-                                if group.caution_count > 0 {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{} need review and are never preselected",
-                                            group.caution_count
-                                        ))
-                                        .font(theme::body(8.5))
-                                        .color(palette.caution),
-                                    );
+                                for finding in &section.findings {
+                                    ui.add_space(5.0);
+                                    if let Some(path) = draw_developer_finding(ui, finding) {
+                                        reveal = Some(path);
+                                    }
                                 }
                             });
                         ui.add_space(6.0);
                     }
                 });
         });
+        if let Some(path) = reveal {
+            reveal_in_finder(&path);
+        }
+        if refresh {
+            self.begin_developer_refresh(true);
+        }
     }
 
     fn draw_apfs_accounting(&mut self, ui: &mut egui::Ui, rect: Rect) {

@@ -26,13 +26,16 @@ sh -n "$ROOT/scripts/test-signed-ui.sh"
 grep -q 'guided-reclaim-visible' "$ROOT/scripts/ui-smoke.applescript" || \
     fail "UI smoke runner must expose guided-reclaim-visible"
 
+grep -q 'static text "DEVELOPER WORKSPACE"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the Developer Deep Dive workspace"
+
 grep -q 'my openSummary(appGroup)' "$ROOT/scripts/ui-smoke.applescript" || \
     fail "guided smoke must reset a previously open detail rail"
 
 grep -q '^RIGHT_CLICK_ATTEMPTS=3$' "$ROOT/scripts/test-signed-ui.sh" || \
     fail "signed UI smoke must retry a lost context-menu click"
 
-if grep -Eiq 'click[^[:cntrl:]]*(Hold to reclaim|Review targets|Review this plan|Open Trash|Scan again|Scan now|Move to SSD|Reveal in Finder|Restore to Mac|Hold to restore|Start review scan|button "Watch"|button "Unwatch")' \
+if grep -Eiq 'click[^[:cntrl:]]*(Hold to reclaim|Review targets|Review this plan|Open Trash|Scan again|Scan now|Move to SSD|Reveal in Finder|Restore to Mac|Hold to restore|Start review scan|button "Refresh"|button "Watch"|button "Unwatch")' \
     "$ROOT/scripts/ui-smoke.applescript" "$ROOT/scripts/test-signed-ui.sh"
 then
     fail "UI smoke runner must not click a cleanup or storage action"
