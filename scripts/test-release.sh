@@ -79,6 +79,10 @@ BUNDLER="$ROOT/make-app.sh"
 RELEASE_CHECKER="$ROOT/scripts/check-release-artifact.sh"
 RELEASE_SCRIPT="$ROOT/scripts/release.sh"
 
+BUNDLER_MODE=$(git -C "$ROOT" ls-files --stage make-app.sh | awk 'NR == 1 { print $1 }')
+[ "$BUNDLER_MODE" = '100755' ] \
+    || fail "make-app.sh must be tracked executable (100755), found $BUNDLER_MODE"
+
 [ -f "$RELEASE_CHECKER" ] \
     || fail "missing scripts/check-release-artifact.sh"
 
@@ -181,6 +185,9 @@ for instructions in "$ROOT/AGENTS.md" "$ROOT/CLAUDE.md"; do
 done
 
 INSTALLER="$ROOT/scripts/install.command"
+INSTALLER_MODE=$(git -C "$ROOT" ls-files --stage scripts/install.command | awk 'NR == 1 { print $1 }')
+[ "$INSTALLER_MODE" = '100755' ] \
+    || fail "install.command must be tracked executable (100755), found $INSTALLER_MODE"
 if grep -Fq 'xattr -dr com.apple.quarantine' "$INSTALLER"; then
     fail "public installer must not bypass Gatekeeper by clearing quarantine"
 fi
