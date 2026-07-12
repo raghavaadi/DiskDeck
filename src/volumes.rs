@@ -14,11 +14,20 @@ pub struct MountedVolume {
     pub device_id: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalFilesystem {
+    pub fs_type: String,
+    pub total_bytes: i64,
+    pub free_bytes: i64,
+    pub read_only: bool,
+    pub local: bool,
+}
+
 pub fn eligible_mount(fs_type: &str, local: bool, is_symlink: bool) -> bool {
     local && !is_symlink && !matches!(fs_type, "autofs" | "nfs" | "smbfs" | "afpfs" | "webdav")
 }
 
-fn statfs_info(path: &Path) -> Option<(String, i64, i64, bool, bool)> {
+pub fn inspect_local_filesystem(path: &Path) -> Option<LocalFilesystem> {
     let cpath = CString::new(path.as_os_str().as_bytes()).ok()?;
     // SAFETY: a zeroed statfs is valid, the C string is NUL-terminated, and
     // every field is read only after libc reports success.
@@ -34,7 +43,13 @@ fn statfs_info(path: &Path) -> Option<(String, i64, i64, bool, bool)> {
     let free_bytes = (stat.f_bavail as i64).saturating_mul(block_size);
     let read_only = stat.f_flags & (libc::MNT_RDONLY as u32) != 0;
     let local = stat.f_flags & (libc::MNT_LOCAL as u32) != 0;
-    Some((fs_type, total_bytes, free_bytes, read_only, local))
+    Some(LocalFilesystem {
+        fs_type,
+        total_bytes,
+        free_bytes,
+        read_only,
+        local,
+    })
 }
 
 pub fn inspect_mounted_volume(path: &Path) -> Option<MountedVolume> {
@@ -46,17 +61,17 @@ pub fn inspect_mounted_volume(path: &Path) -> Option<MountedVolume> {
     if !metadata.is_dir() || is_symlink {
         return None;
     }
-    let (fs_type, total_bytes, free_bytes, read_only, local) = statfs_info(path)?;
-    if !eligible_mount(&fs_type, local, is_symlink) {
+    let filesystem = inspect_local_filesystem(path)?;
+    if !eligible_mount(&filesystem.fs_type, filesystem.local, is_symlink) {
         return None;
     }
     Some(MountedVolume {
         name: path.file_name()?.to_string_lossy().into_owned(),
         mount_path: path.to_path_buf(),
-        fs_type,
-        total_bytes,
-        free_bytes,
-        read_only,
+        fs_type: filesystem.fs_type,
+        total_bytes: filesystem.total_bytes,
+        free_bytes: filesystem.free_bytes,
+        read_only: filesystem.read_only,
         device_id: metadata.dev(),
     })
 }
@@ -95,7 +110,10 @@ pub fn mounted_external_volumes() -> Vec<MountedVolume> {
 
 #[cfg(test)]
 mod tests {
-    use super::{eligible_mount, is_same_mount, sort_volumes, MountedVolume};
+    use super::{
+        eligible_mount, inspect_local_filesystem, is_same_mount, sort_volumes, LocalFilesystem,
+        MountedVolume,
+    };
     use std::path::PathBuf;
 
     fn volume(name: &str, path: &str, fs_type: &str, device_id: u64) -> MountedVolume {
@@ -108,6 +126,29 @@ mod tests {
             read_only: false,
             device_id,
         }
+    }
+
+    #[test]
+    fn local_filesystem_descriptor_reports_bounded_capacity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = inspect_local_filesystem(tmp.path()).unwrap();
+        assert!(!fs.fs_type.is_empty());
+        assert!(fs.total_bytes > 0);
+        assert!(fs.free_bytes >= 0);
+        assert!(fs.free_bytes <= fs.total_bytes);
+        assert!(fs.local);
+    }
+
+    #[test]
+    fn mounted_volume_projection_uses_the_shared_descriptor() {
+        let descriptor = LocalFilesystem {
+            fs_type: "apfs".into(),
+            total_bytes: 500,
+            free_bytes: 125,
+            read_only: false,
+            local: true,
+        };
+        assert!(eligible_mount(&descriptor.fs_type, descriptor.local, false));
     }
 
     #[test]
