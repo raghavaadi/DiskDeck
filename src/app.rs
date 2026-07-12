@@ -23,7 +23,11 @@ use crate::offload::{
     can_confirm_offload, check_movable, classify_movable, external_volumes, has_room, run_offload,
     OffloadEvent, OffloadJob, Volume,
 };
-use crate::reclaim_history::history_path_for_home;
+use crate::reclaim_history::{
+    history_path_for_home, now_ms, refresh_history, run_restore as run_trash_restore,
+    ReceiptAction, ReceiptItem, ReceiptState, ReclaimHistory, RestoreEvent as TrashRestoreEvent,
+    RestoreJob as TrashRestoreJob,
+};
 use crate::reclaim_plan::{
     build_plan, parse_goal_gb, GoalError, OutcomeTracker, ReclaimOutcome, ReclaimPlan, GB,
 };
@@ -179,6 +183,7 @@ enum RailView {
     Leftovers,
     Monitor,
     FileReview,
+    ReclaimHistory,
 }
 
 fn rail_back_target(view: RailView) -> Option<RailView> {
@@ -191,7 +196,8 @@ fn rail_back_target(view: RailView) -> Option<RailView> {
         | RailView::Apfs
         | RailView::Leftovers
         | RailView::Monitor
-        | RailView::FileReview => Some(RailView::Insights),
+        | RailView::FileReview
+        | RailView::ReclaimHistory => Some(RailView::Insights),
     }
 }
 
@@ -199,6 +205,11 @@ struct RestoreDialog {
     item: MovedItem,
     acknowledged: bool,
     block: Option<RestoreBlock>,
+}
+
+struct TrashRestoreDialog {
+    item: ReceiptItem,
+    acknowledged: bool,
 }
 
 pub struct App {
@@ -241,6 +252,13 @@ pub struct App {
     restoring: bool,
     restore_dialog: Option<RestoreDialog>,
     restore_hold: f32,
+    reclaim_history_rx: Option<Receiver<Result<ReclaimHistory, String>>>,
+    reclaim_history: ReclaimHistory,
+    reclaim_history_error: Option<String>,
+    trash_restore_rx: Option<Receiver<TrashRestoreEvent>>,
+    restoring_trash: bool,
+    trash_restore_dialog: Option<TrashRestoreDialog>,
+    trash_restore_hold: f32,
     growth_watch_rx: Option<Receiver<Result<GrowthWatch, String>>>,
     growth_watch: GrowthWatch,
     growth_watch_error: Option<String>,
@@ -604,6 +622,13 @@ impl App {
             restoring: false,
             restore_dialog: None,
             restore_hold: 0.0,
+            reclaim_history_rx: None,
+            reclaim_history: ReclaimHistory::default(),
+            reclaim_history_error: None,
+            trash_restore_rx: None,
+            restoring_trash: false,
+            trash_restore_dialog: None,
+            trash_restore_hold: 0.0,
             growth_watch_rx: None,
             growth_watch: GrowthWatch::default(),
             growth_watch_error: None,
@@ -1267,6 +1292,7 @@ impl App {
                             "tip: select the Trash target and reclaim again (or empty Trash in Finder) to finish the job");
                     }
                     self.ops(OpsKind::Dim, "rescan to refresh the terrain map");
+                    self.force_reclaim_history_refresh();
                     return;
                 }
             }
@@ -1331,6 +1357,138 @@ impl App {
         std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .unwrap_or_default()
+    }
+
+    fn mutation_busy(&self) -> bool {
+        self.cleaning || self.offloading || self.restoring || self.restoring_trash
+    }
+
+    fn begin_reclaim_history_refresh(&mut self) {
+        if self.reclaim_history_rx.is_some() {
+            return;
+        }
+        let home = Self::home_dir();
+        let history = history_path_for_home(&home);
+        let (tx, rx) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("reclaim-history-refresh".into())
+            .spawn(move || {
+                let _ = tx.send(refresh_history(&history, &home));
+            }) {
+            Ok(_) => {
+                self.reclaim_history_rx = Some(rx);
+                self.reclaim_history_error = None;
+            }
+            Err(error) => {
+                self.reclaim_history_error =
+                    Some(format!("start reclaim-history refresh: {error}"));
+            }
+        }
+    }
+
+    fn force_reclaim_history_refresh(&mut self) {
+        self.reclaim_history_rx = None;
+        self.begin_reclaim_history_refresh();
+    }
+
+    fn poll_reclaim_history(&mut self) {
+        let result = match self.reclaim_history_rx.as_ref().map(Receiver::try_recv) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Some(Err("reclaim-history worker stopped before reporting".into()))
+            }
+        };
+        self.reclaim_history_rx = None;
+        match result.unwrap() {
+            Ok(history) => {
+                self.reclaim_history = history;
+                self.reclaim_history_error = None;
+            }
+            Err(error) => {
+                self.reclaim_history_error = Some(error.clone());
+                self.ops(
+                    OpsKind::Amber,
+                    format!("reclaim history unavailable — {error}"),
+                );
+            }
+        }
+    }
+
+    fn invalidate_scan_after_trash_restore(&mut self) {
+        self.scan = None;
+        self.view = None;
+        self.crumbs.clear();
+        self.zoom = None;
+        self.recs.clear();
+        self.recs_built = false;
+        self.recs_revision = self.recs_revision.wrapping_add(1);
+        self.guide_revision = None;
+        self.guide_acknowledged = false;
+        self.guided_goal_for_review = None;
+    }
+
+    fn poll_trash_restore(&mut self) {
+        let Some(rx) = &self.trash_restore_rx else {
+            return;
+        };
+        let mut events = Vec::new();
+        let disconnected = loop {
+            match rx.try_recv() {
+                Ok(event) => events.push(event),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break false,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break true,
+            }
+        };
+        let terminal = events.iter().any(|event| {
+            matches!(
+                event,
+                TrashRestoreEvent::Done { .. } | TrashRestoreEvent::Failed { .. }
+            )
+        });
+        if disconnected && !terminal {
+            events.push(TrashRestoreEvent::Failed {
+                error: "Trash restore worker stopped before reporting".into(),
+            });
+        }
+        for event in events {
+            match event {
+                TrashRestoreEvent::Started { title, bytes } => self.ops(
+                    OpsKind::Info,
+                    format!("restoring {title} from Trash — {}", fmt_bytes(bytes)),
+                ),
+                TrashRestoreEvent::Done {
+                    bytes,
+                    origin,
+                    warning,
+                } => {
+                    self.restoring_trash = false;
+                    self.trash_restore_rx = None;
+                    self.stats = disk_stats();
+                    self.stats_at = Instant::now();
+                    self.invalidate_scan_after_trash_restore();
+                    self.ops(
+                        OpsKind::Ok,
+                        format!(
+                            "✓ restored {} from Trash to {}",
+                            fmt_bytes(bytes),
+                            origin.display()
+                        ),
+                    );
+                    if let Some(warning) = warning {
+                        self.ops(OpsKind::Amber, warning);
+                    }
+                    self.ops(OpsKind::Dim, "scan again to refresh the terrain map");
+                    self.force_reclaim_history_refresh();
+                }
+                TrashRestoreEvent::Failed { error } => {
+                    self.restoring_trash = false;
+                    self.trash_restore_rx = None;
+                    self.ops(OpsKind::Err, format!("✗ Trash restore failed — {error}"));
+                    self.force_reclaim_history_refresh();
+                }
+            }
+        }
     }
 
     fn begin_move_refresh(&mut self) {
@@ -1419,8 +1577,11 @@ impl App {
 
     /// Prepare and show the offload confirm dialog for a real (stripped) path.
     fn open_offload_dialog(&mut self, src: std::path::PathBuf, size: i64) {
-        if self.offloading {
-            self.ops(OpsKind::Amber, "a move is already in progress");
+        if self.mutation_busy() {
+            self.ops(
+                OpsKind::Amber,
+                "another storage operation is already active",
+            );
             return;
         }
         let vols = external_volumes();
@@ -1448,7 +1609,11 @@ impl App {
     }
 
     fn fire_reclaim(&mut self) {
-        if self.cleaning {
+        if self.mutation_busy() {
+            self.ops(
+                OpsKind::Amber,
+                "another storage operation is already active",
+            );
             return;
         }
         let jobs: Vec<CleanJob> = self
@@ -1540,6 +1705,60 @@ fn review_row_columns(available_width: f32) -> ReviewRowColumns {
         gutter,
         utility_width,
     }
+}
+
+fn reclaim_history_row_columns(available_width: f32) -> ReviewRowColumns {
+    let available_width = available_width.max(0.0);
+    let utility_width = available_width.min(104.0);
+    let gutter = (available_width - utility_width).clamp(0.0, 8.0);
+    let text_width = (available_width - utility_width - gutter).max(0.0);
+    ReviewRowColumns {
+        text_width,
+        gutter,
+        utility_width,
+    }
+}
+
+fn receipt_state_copy(state: &ReceiptState) -> &'static str {
+    match state {
+        ReceiptState::Ready => "Ready to restore",
+        ReceiptState::Missing => "Trash item missing",
+        ReceiptState::OriginOccupied => "Original path occupied",
+        ReceiptState::Changed => "Changed in Trash",
+        ReceiptState::ManualOnly => "Open Trash to restore manually",
+        ReceiptState::UnsafeOrigin => "Restore unavailable",
+        ReceiptState::SymlinkAncestor => "Original path cannot be verified",
+        ReceiptState::CrossDevice => "Original volume changed",
+        ReceiptState::Unavailable => "Restore unavailable",
+        ReceiptState::Restored => "Restored",
+        ReceiptState::Permanent => "Permanent — cannot restore",
+    }
+}
+
+fn receipt_action_copy(action: ReceiptAction) -> &'static str {
+    match action {
+        ReceiptAction::Trash => "Trash",
+        ReceiptAction::Delete => "Permanent erase",
+        ReceiptAction::Empty => "Emptied contents",
+        ReceiptAction::Command => "Vetted cleanup command",
+    }
+}
+
+fn receipt_age_copy(completed_at_ms: i64) -> String {
+    let age = now_ms().saturating_sub(completed_at_ms).max(0) / 1000;
+    if age < 60 {
+        "just now".into()
+    } else if age < 3600 {
+        format!("{} min ago", age / 60)
+    } else if age < 86_400 {
+        format!("{} h ago", age / 3600)
+    } else {
+        format!("{} d ago", age / 86_400)
+    }
+}
+
+fn can_start_trash_restore(acknowledged: bool, state: &ReceiptState, mutation_busy: bool) -> bool {
+    acknowledged && *state == ReceiptState::Ready && !mutation_busy
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2076,6 +2295,88 @@ mod tests {
             rail_back_target(RailView::FileReview),
             Some(RailView::Insights)
         );
+        assert_eq!(
+            rail_back_target(RailView::ReclaimHistory),
+            Some(RailView::Insights)
+        );
+    }
+
+    #[test]
+    fn recovery_copy_is_plain_and_never_promises_permanent_undo() {
+        assert_eq!(receipt_state_copy(&ReceiptState::Ready), "Ready to restore");
+        assert_eq!(
+            receipt_state_copy(&ReceiptState::Permanent),
+            "Permanent — cannot restore"
+        );
+        assert_eq!(
+            receipt_state_copy(&ReceiptState::ManualOnly),
+            "Open Trash to restore manually"
+        );
+        assert_eq!(
+            receipt_state_copy(&ReceiptState::Changed),
+            "Changed in Trash"
+        );
+    }
+
+    #[test]
+    fn mutation_gate_blocks_every_overlapping_pipeline() {
+        let mut app = App::new();
+        assert!(!app.mutation_busy());
+        app.cleaning = true;
+        assert!(app.mutation_busy());
+        app.cleaning = false;
+        app.offloading = true;
+        assert!(app.mutation_busy());
+        app.offloading = false;
+        app.restoring = true;
+        assert!(app.mutation_busy());
+        app.restoring = false;
+        app.restoring_trash = true;
+        assert!(app.mutation_busy());
+    }
+
+    #[test]
+    fn disconnected_trash_restore_worker_clears_busy_state() {
+        let mut app = App::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(tx);
+        app.trash_restore_rx = Some(rx);
+        app.restoring_trash = true;
+
+        app.poll_trash_restore();
+
+        assert!(!app.restoring_trash);
+        assert!(app.trash_restore_rx.is_none());
+        assert!(app
+            .ops
+            .last()
+            .unwrap()
+            .text
+            .contains("stopped before reporting"));
+    }
+
+    #[test]
+    fn trash_restore_requires_acknowledgement_ready_state_and_idle_mutation_gate() {
+        assert!(can_start_trash_restore(true, &ReceiptState::Ready, false));
+        assert!(!can_start_trash_restore(false, &ReceiptState::Ready, false));
+        assert!(!can_start_trash_restore(
+            true,
+            &ReceiptState::Changed,
+            false
+        ));
+        assert!(!can_start_trash_restore(true, &ReceiptState::Ready, true));
+    }
+
+    #[test]
+    fn reclaim_history_rows_reserve_a_non_overlapping_action_column() {
+        let columns = reclaim_history_row_columns(276.0);
+        assert_eq!(columns.gutter, 8.0);
+        assert_eq!(columns.utility_width, 104.0);
+        assert_eq!(columns.text_width, 164.0);
+        assert!(
+            columns.text_width + columns.gutter + columns.utility_width <= 276.0,
+            "reclaim-history columns must never exceed the available width"
+        );
     }
 
     #[test]
@@ -2246,6 +2547,7 @@ fn draw_brand_mark(ui: &egui::Ui, rect: Rect) {
             Stroke::new(1.4, color),
         ));
     }
+
     painter.line_segment(
         [center + vec2(-9.0, 0.0), center + vec2(-9.0, 11.0)],
         Stroke::new(1.4, palette.muted),
@@ -2372,13 +2674,17 @@ impl eframe::App for App {
         self.poll_history();
         self.poll_moves();
         self.poll_restore();
+        self.poll_reclaim_history();
+        self.poll_trash_restore();
         self.poll_growth_watch();
         self.poll_developer();
         self.poll_apfs();
         self.poll_leftovers();
         self.poll_file_review();
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            if self.restore_dialog.take().is_some() {
+            if self.trash_restore_dialog.take().is_some() {
+                self.trash_restore_hold = 0.0;
+            } else if self.restore_dialog.take().is_some() {
                 self.restore_hold = 0.0;
             } else if self.dialog.is_none() {
                 if let Some(target) = rail_back_target(self.rail_view) {
@@ -2404,6 +2710,10 @@ impl eframe::App for App {
             || self.moves_rx.is_some()
             || self.restoring
             || self.restore_dialog.is_some()
+            || self.reclaim_history_rx.is_some()
+            || self.restoring_trash
+            || self.trash_restore_dialog.is_some()
+            || self.trash_restore_rx.is_some()
             || self.growth_watch_rx.is_some()
             || self.developer_rx.is_some()
             || self.apfs_rx.is_some()
@@ -2420,6 +2730,7 @@ impl eframe::App for App {
         self.central(ctx);
         self.offload_dialog(ctx);
         self.restore_dialog(ctx);
+        self.trash_restore_dialog(ctx);
         self.stamp_overlay(ctx);
     }
 }
@@ -3113,6 +3424,10 @@ impl App {
                 self.draw_file_review(ui, rect);
                 return;
             }
+            RailView::ReclaimHistory => {
+                self.draw_reclaim_history(ui, rect);
+                return;
+            }
             RailView::Reclaim => {}
         }
 
@@ -3324,12 +3639,51 @@ impl App {
             .rounding(Rounding::same(8.0));
             if ui
                 .add_sized(ui.available_size(), button)
-                .on_hover_text("Moved items, growth, developer storage, APFS, and app leftovers")
+                .on_hover_text(
+                    "Reclaim history, moved items, growth, developer storage, APFS, and app leftovers",
+                )
                 .clicked()
             {
                 self.rail_view = RailView::Insights;
             }
         });
+        let last_reclaim = self.reclaim_history.items.first().map(|last| {
+            format!(
+                "Last reclaim · {} · {}",
+                tail_str(&last.receipt.title, 25),
+                receipt_age_copy(last.receipt.completed_at_ms)
+            )
+        });
+        if let Some(detail) = last_reclaim {
+            let history_rect = Rect::from_min_size(
+                pos2(rect.min.x, moved_rect.max.y + 8.0),
+                vec2(rect.width(), 38.0),
+            );
+            let mut open_history = false;
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(history_rect), |ui| {
+                if ui
+                    .add_sized(
+                        ui.available_size(),
+                        egui::Button::new(
+                            RichText::new(detail)
+                                .font(theme::body(9.5))
+                                .color(palette.muted),
+                        )
+                        .fill(palette.surface)
+                        .stroke(Stroke::new(1.0, palette.edge_soft))
+                        .rounding(Rounding::same(8.0)),
+                    )
+                    .on_hover_text("Open local cleanup receipts and Trash recovery")
+                    .clicked()
+                {
+                    open_history = true;
+                }
+            });
+            if open_history {
+                self.rail_view = RailView::ReclaimHistory;
+                self.begin_reclaim_history_refresh();
+            }
+        }
         let footer = Rect::from_min_max(pos2(rect.min.x, rect.max.y - 112.0), rect.max);
         let footer_fill = if ui.visuals().dark_mode {
             Color32::from_rgb(0x14, 0x2a, 0x2c)
@@ -3820,6 +4174,18 @@ impl App {
             .count();
         let entries = [
             (
+                "Reclaim History",
+                if self.reclaim_history.items.is_empty() {
+                    "Cleanup receipts and verified Trash recovery".into()
+                } else {
+                    format!(
+                        "{} local cleanup receipt(s)",
+                        self.reclaim_history.items.len()
+                    )
+                },
+                RailView::ReclaimHistory,
+            ),
+            (
                 "Moved items",
                 format!("{moved_count} currently away"),
                 RailView::Moved,
@@ -3887,12 +4253,284 @@ impl App {
         if let Some(target) = open {
             self.rail_view = target;
             match target {
+                RailView::ReclaimHistory => self.begin_reclaim_history_refresh(),
                 RailView::Moved => self.begin_move_refresh(),
                 RailView::Growth => self.begin_growth_refresh(),
                 RailView::Developer => self.begin_developer_refresh(false),
                 RailView::Apfs => self.begin_apfs_refresh(),
                 _ => {}
             }
+        }
+    }
+
+    fn draw_reclaim_history(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let meta = format!("{} receipts · local only", self.reclaim_history.items.len());
+        let content = panel_chrome(ui, rect, "Reclaim History", Some((meta, palette.faint)));
+        let nav = Rect::from_min_size(
+            content.min + vec2(10.0, 4.0),
+            vec2(content.width() - 20.0, 30.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(nav), |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("← Insights")
+                                .font(theme::display_md(10.5))
+                                .color(palette.accent),
+                        )
+                        .frame(false),
+                    )
+                    .clicked()
+                {
+                    self.rail_view = RailView::Insights;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            self.reclaim_history_rx.is_none(),
+                            egui::Button::new(
+                                RichText::new(if self.reclaim_history_rx.is_some() {
+                                    "Refreshing…"
+                                } else {
+                                    "Refresh"
+                                })
+                                .font(theme::mono(9.5)),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.begin_reclaim_history_refresh();
+                    }
+                });
+            });
+        });
+
+        let body = Rect::from_min_max(
+            pos2(content.min.x + 10.0, nav.max.y + 4.0),
+            pos2(content.max.x - 10.0, content.max.y - 4.0),
+        );
+        let mut restore_index = None;
+        let mut reveal_path = None;
+        let mut show_trash = false;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(body), |ui| {
+            if let Some(error) = &self.reclaim_history_error {
+                ui.label(
+                    RichText::new(format!("Reclaim History unavailable\n{error}"))
+                        .font(theme::body(10.5))
+                        .color(palette.danger),
+                );
+                return;
+            }
+            if self.reclaim_history_rx.is_some() && self.reclaim_history.items.is_empty() {
+                ui.label(
+                    RichText::new("Checking local cleanup receipts…")
+                        .font(theme::body(10.5))
+                        .color(palette.muted),
+                );
+                return;
+            }
+            if self.reclaim_history.items.is_empty() {
+                ui.label(
+                    RichText::new(
+                        "No cleanup receipts yet. Successful reclaims appear here; exact Trash moves can be restored while they remain unchanged.",
+                    )
+                    .font(theme::body(10.5))
+                    .color(palette.muted),
+                );
+                return;
+            }
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let card_width = ((ui.available_width() - 12.0) / 3.0).max(72.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        for (label, value, color) in [
+                            (
+                                "FREED",
+                                fmt_bytes(self.reclaim_history.freed_bytes),
+                                palette.safe,
+                            ),
+                            (
+                                "IN TRASH",
+                                fmt_bytes(self.reclaim_history.pending_bytes),
+                                palette.caution,
+                            ),
+                            (
+                                "RECOVERABLE",
+                                self.reclaim_history.recoverable_count.to_string(),
+                                palette.accent,
+                            ),
+                        ] {
+                            Frame::none()
+                                .fill(palette.surface)
+                                .stroke(Stroke::new(1.0, palette.edge_soft))
+                                .rounding(Rounding::same(8.0))
+                                .inner_margin(Margin::symmetric(7.0, 6.0))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(card_width - 16.0);
+                                    ui.label(
+                                        RichText::new(label)
+                                            .font(theme::mono(7.5))
+                                            .color(palette.faint),
+                                    );
+                                    ui.label(
+                                        RichText::new(value)
+                                            .font(theme::display_md(10.5))
+                                            .color(color),
+                                    );
+                                });
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("Receipt totals are local records, not a new disk scan.")
+                            .font(theme::body(8.5))
+                            .color(palette.faint),
+                    );
+                    ui.add_space(6.0);
+
+                    for (index, item) in self.reclaim_history.items.iter().enumerate() {
+                        let state_color = match item.state {
+                            ReceiptState::Ready | ReceiptState::Restored => palette.safe,
+                            ReceiptState::Permanent => palette.danger,
+                            ReceiptState::Missing
+                            | ReceiptState::OriginOccupied
+                            | ReceiptState::Changed
+                            | ReceiptState::ManualOnly
+                            | ReceiptState::UnsafeOrigin
+                            | ReceiptState::SymlinkAncestor
+                            | ReceiptState::CrossDevice
+                            | ReceiptState::Unavailable => palette.caution,
+                        };
+                        Frame::none()
+                            .fill(palette.surface)
+                            .stroke(Stroke::new(1.0, palette.edge_soft))
+                            .rounding(Rounding::same(9.0))
+                            .inner_margin(Margin::symmetric(9.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                let columns = reclaim_history_row_columns(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 0.0;
+                                    ui.allocate_ui_with_layout(
+                                        vec2(columns.text_width, 76.0),
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| {
+                                            ui.set_width(columns.text_width);
+                                            ui.label(
+                                                RichText::new(tail_str(&item.receipt.title, 30))
+                                                    .font(theme::display_md(11.0))
+                                                    .color(palette.ink),
+                                            );
+                                            ui.label(
+                                                RichText::new(tail_str(
+                                                    &item.receipt.origin.display().to_string(),
+                                                    38,
+                                                ))
+                                                .font(theme::mono(8.5))
+                                                .color(palette.faint),
+                                            );
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "{} · {} · {}",
+                                                    receipt_action_copy(item.receipt.action),
+                                                    receipt_age_copy(
+                                                        item.receipt.completed_at_ms
+                                                    ),
+                                                    fmt_bytes(
+                                                        item.receipt.freed_bytes.max(
+                                                            item.receipt.pending_bytes
+                                                        )
+                                                    )
+                                                ))
+                                                .font(theme::body(8.5))
+                                                .color(palette.muted),
+                                            );
+                                            ui.label(
+                                                RichText::new(receipt_state_copy(&item.state))
+                                                    .font(theme::body(9.0))
+                                                    .color(state_color),
+                                            );
+                                        },
+                                    );
+                                    ui.add_space(columns.gutter);
+                                    ui.allocate_ui_with_layout(
+                                        vec2(columns.utility_width, 76.0),
+                                        egui::Layout::top_down(egui::Align::Max),
+                                        |ui| {
+                                            ui.set_width(columns.utility_width);
+                                            if item.state == ReceiptState::Ready
+                                                && ui
+                                                    .add_enabled(
+                                                        !self.mutation_busy(),
+                                                        egui::Button::new(
+                                                            RichText::new("Restore…")
+                                                                .font(theme::display_md(9.0)),
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                            {
+                                                restore_index = Some(index);
+                                            }
+                                            let revealable = matches!(
+                                                item.state,
+                                                ReceiptState::Ready
+                                                    | ReceiptState::OriginOccupied
+                                                    | ReceiptState::Changed
+                                                    | ReceiptState::SymlinkAncestor
+                                                    | ReceiptState::CrossDevice
+                                            );
+                                            if revealable {
+                                                if ui
+                                                    .button(
+                                                        RichText::new("Reveal in Trash")
+                                                            .font(theme::body(8.5)),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    reveal_path = item
+                                                        .receipt
+                                                        .trash
+                                                        .as_ref()
+                                                        .map(|evidence| evidence.path.clone());
+                                                }
+                                            } else if matches!(
+                                                item.state,
+                                                ReceiptState::ManualOnly | ReceiptState::Missing
+                                            ) && ui
+                                                .button(
+                                                    RichText::new("Open Trash")
+                                                        .font(theme::body(8.5)),
+                                                )
+                                                .clicked()
+                                            {
+                                                show_trash = true;
+                                            }
+                                        },
+                                    );
+                                });
+                            });
+                        ui.add_space(6.0);
+                    }
+                });
+        });
+
+        if let Some(index) = restore_index {
+            self.trash_restore_dialog = Some(TrashRestoreDialog {
+                item: self.reclaim_history.items[index].clone(),
+                acknowledged: false,
+            });
+            self.trash_restore_hold = 0.0;
+        }
+        if let Some(path) = reveal_path {
+            reveal_in_finder(&path);
+        }
+        if show_trash {
+            open_trash();
         }
     }
 
@@ -4038,7 +4676,7 @@ impl App {
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             let enabled = item.state == MoveState::Ready
-                                                && !self.restoring;
+                                                && !self.mutation_busy();
                                             if ui
                                                 .add_enabled(
                                                     enabled,
@@ -5508,7 +6146,7 @@ impl App {
             pos2(rect.max.x - 226.0, rect.min.y + 11.0),
             vec2(210.0, 42.0),
         );
-        let enabled = count > 0 && !self.cleaning;
+        let enabled = count > 0 && !self.mutation_busy();
         let resp = ui.interact(btn, ui.id().with("reclaim"), Sense::click_and_drag());
         let alpha = if enabled { 1.0 } else { 0.35 };
         let border = action_color;
@@ -5679,7 +6317,13 @@ impl App {
                 });
             });
 
-        if launch {
+        if launch && self.mutation_busy() {
+            self.ops(
+                OpsKind::Amber,
+                "another storage operation is already active",
+            );
+            self.dialog = Some(dlg);
+        } else if launch {
             let vol = dlg.vols[dlg.vol_idx].clone();
             let (tx, rx) = std::sync::mpsc::channel();
             self.offload_rx = Some(rx);
@@ -5812,7 +6456,13 @@ impl App {
                 });
             });
 
-        if launch {
+        if launch && self.mutation_busy() {
+            self.ops(
+                OpsKind::Amber,
+                "another storage operation is already active",
+            );
+            self.restore_dialog = Some(dialog);
+        } else if launch {
             let home = Self::home_dir();
             let (tx, rx) = std::sync::mpsc::channel();
             let job = RestoreJob {
@@ -5835,6 +6485,177 @@ impl App {
             }
         } else if keep_open {
             self.restore_dialog = Some(dialog);
+        }
+    }
+
+    fn trash_restore_dialog(&mut self, ctx: &Context) {
+        let palette = theme::palette(ctx);
+        let Some(mut dialog) = self.trash_restore_dialog.take() else {
+            return;
+        };
+        let mut keep_open = true;
+        let mut launch = false;
+
+        egui::Window::new(RichText::new("Restore from Trash").font(theme::body(13.0)))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_width(480.0);
+                ui.label(
+                    RichText::new(&dialog.item.receipt.title)
+                        .font(theme::display_md(13.0))
+                        .color(palette.ink),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "Original: {}",
+                        tail_str(&dialog.item.receipt.origin.display().to_string(), 66)
+                    ))
+                    .font(theme::mono(9.5))
+                    .color(palette.muted),
+                );
+                let trash = dialog
+                    .item
+                    .receipt
+                    .trash
+                    .as_ref()
+                    .map(|evidence| evidence.path.display().to_string())
+                    .unwrap_or_else(|| "Finder-managed destination".into());
+                ui.label(
+                    RichText::new(format!("Trash: {}", tail_str(&trash, 69)))
+                        .font(theme::mono(9.5))
+                        .color(palette.muted),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "{} · {}",
+                        fmt_bytes(dialog.item.receipt.pending_bytes),
+                        receipt_age_copy(dialog.item.receipt.completed_at_ms)
+                    ))
+                    .font(theme::body(9.5))
+                    .color(palette.faint),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "DiskDeck repeats every path and identity check, then performs one atomic no-overwrite rename. It never empties Trash or replaces an existing original path.",
+                    )
+                    .font(theme::body(10.0))
+                    .color(palette.muted),
+                );
+                ui.add_space(10.0);
+
+                if dialog.item.state == ReceiptState::Ready {
+                    ui.checkbox(
+                        &mut dialog.acknowledged,
+                        "I understand this restores the item to its original path",
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(format!(
+                            "Restore unavailable — {}",
+                            receipt_state_copy(&dialog.item.state)
+                        ))
+                        .font(theme::body(10.5))
+                        .color(palette.caution),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let busy = self.mutation_busy();
+                    let enabled = can_start_trash_restore(
+                        dialog.acknowledged,
+                        &dialog.item.state,
+                        busy,
+                    );
+                    let label = if dialog.item.state != ReceiptState::Ready {
+                        "Restore unavailable"
+                    } else if busy {
+                        "Another operation is active"
+                    } else if !dialog.acknowledged {
+                        "Confirm the acknowledgement"
+                    } else {
+                        "Hold to restore from Trash"
+                    };
+                    let (rect, response) =
+                        ui.allocate_exact_size(vec2(250.0, 30.0), Sense::click_and_drag());
+                    let base = if enabled { palette.safe } else { palette.edge };
+                    ui.painter().rect_stroke(
+                        rect,
+                        Rounding::same(8.0),
+                        Stroke::new(1.0, base),
+                    );
+                    if self.trash_restore_hold > 0.0 {
+                        let fill = Rect::from_min_size(
+                            rect.min,
+                            vec2(
+                                rect.width() * self.trash_restore_hold,
+                                rect.height(),
+                            ),
+                        );
+                        ui.painter().rect_filled(
+                            fill,
+                            Rounding::same(8.0),
+                            palette.safe_dim(34),
+                        );
+                    }
+                    ui.painter().text(
+                        rect.center(),
+                        Align2::CENTER_CENTER,
+                        label,
+                        theme::body(10.0),
+                        if enabled { palette.safe } else { palette.faint },
+                    );
+                    if enabled && response.is_pointer_button_down_on() {
+                        self.trash_restore_hold +=
+                            ui.input(|input| input.stable_dt).min(0.1) / HOLD_SECS;
+                        ui.ctx().request_repaint();
+                        if self.trash_restore_hold >= 1.0 {
+                            self.trash_restore_hold = 0.0;
+                            launch = true;
+                        }
+                    } else {
+                        self.trash_restore_hold = 0.0;
+                    }
+                    if ui
+                        .button(RichText::new("Cancel").font(theme::mono(10.5)))
+                        .clicked()
+                    {
+                        keep_open = false;
+                    }
+                });
+            });
+
+        if launch && !self.mutation_busy() {
+            let home = Self::home_dir();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let job = TrashRestoreJob {
+                receipt: dialog.item.receipt.clone(),
+                history_path: history_path_for_home(&home),
+                home,
+            };
+            match run_trash_restore(job, tx) {
+                Ok(()) => {
+                    self.trash_restore_rx = Some(rx);
+                    self.restoring_trash = true;
+                    self.ops(
+                        OpsKind::Amber,
+                        format!(
+                            "Trash restore engaged — {}",
+                            dialog.item.receipt.origin.display()
+                        ),
+                    );
+                }
+                Err(error) => {
+                    self.ops(
+                        OpsKind::Err,
+                        format!("✗ Trash restore could not start — {error}"),
+                    );
+                }
+            }
+        } else if keep_open {
+            self.trash_restore_dialog = Some(dialog);
         }
     }
 
