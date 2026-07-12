@@ -38,6 +38,8 @@ grep -Fq '(runtime)' "$DETAILS" \
     || fail "release app is missing hardened runtime"
 grep -Fq 'Timestamp=' "$DETAILS" \
     || fail "release app is missing a secure signing timestamp"
+grep -Fq 'TeamIdentifier=65KMSM8WL8' "$DETAILS" \
+    || fail "release app is not signed by DiskDeck team 65KMSM8WL8"
 
 BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST" 2>/dev/null) \
     || fail "cannot read release bundle identifier"

@@ -12,7 +12,7 @@
 
 - `CFBundleIdentifier` stays exactly `com.buddyhq.headroom-rs`.
 - Local QA keeps `Apple Development: aadithyaraghav@gmail.com (ZFZMAP2UJ3)`.
-- Public assets require `Developer ID Application:`, hardened runtime, secure timestamp, notarization, and stapling.
+- Public assets require `Developer ID Application:`, exact team identifier `65KMSM8WL8`, hardened runtime, secure timestamp, notarization, and stapling.
 - Notary credentials are referenced only by a macOS Keychain profile name.
 - GitHub CI remains read-only and never builds, signs, notarizes, or uploads the app.
 - Release automation never force-pushes, deletes remote state, or overwrites assets.

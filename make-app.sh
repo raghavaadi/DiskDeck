@@ -38,7 +38,8 @@ if [ "$DISTRIBUTION" = "1" ]; then
     echo "✗ public releases require Developer ID Application signing" >&2
     exit 1
   }
-  security find-identity -v -p codesigning | grep -Fq "\"$IDENTITY\"" || {
+  AVAILABLE_IDENTITIES="$(security find-identity -v -p codesigning)"
+  printf '%s\n' "$AVAILABLE_IDENTITIES" | grep -Fq "\"$IDENTITY\"" || {
     echo "✗ Developer ID signing identity is not available in the keychain" >&2
     exit 1
   }
@@ -127,6 +128,12 @@ fi
 
 if [ "$DISTRIBUTION" = "1" ]; then
   codesign --force --deep --options runtime --timestamp --sign "$IDENTITY" "$APP"
+  SIGNATURE_DETAILS="$BUILD/signature-details.txt"
+  codesign -dv --verbose=4 "$APP" 2> "$SIGNATURE_DETAILS"
+  grep -Fq 'TeamIdentifier=65KMSM8WL8' "$SIGNATURE_DETAILS" || {
+    echo "✗ public signing identity is not DiskDeck team 65KMSM8WL8" >&2
+    exit 1
+  }
 else
   codesign --force --deep --sign "$IDENTITY" "$APP"
 fi

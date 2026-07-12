@@ -94,6 +94,7 @@ for required in \
     '--timeout 1h' \
     'Print :status' \
     'Accepted' \
+    'TeamIdentifier=65KMSM8WL8' \
     'stapler staple' \
     'stapler validate'
 do
@@ -106,6 +107,7 @@ for required in \
     'Authority=Developer ID Application:' \
     '(runtime)' \
     'Timestamp=' \
+    'TeamIdentifier=65KMSM8WL8' \
     'com.buddyhq.headroom-rs' \
     'stapler validate' \
     'spctl --assess --type execute'

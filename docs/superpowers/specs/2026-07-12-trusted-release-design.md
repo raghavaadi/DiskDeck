@@ -59,9 +59,10 @@ not the primary distribution experience.
    Its ZIP is a test artifact, not a public release.
 2. **Distribution mode.** Enabled only by the release orchestrator. It requires
    an identity whose name starts with `Developer ID Application:`, signs with
-   hardened runtime and a secure timestamp, submits the app to Apple's notary
-   service, staples and validates the ticket, packages the stapled app, and
-   performs Gatekeeper assessment. It does not open the app or System Settings.
+   DiskDeck's exact team identifier `65KMSM8WL8`, hardened runtime, and a secure
+   timestamp; submits the app to Apple's notary service; staples and validates
+   the ticket; packages the stapled app; and performs Gatekeeper assessment.
+   It does not open the app or System Settings.
 
 Both modes derive `CFBundleShortVersionString` from the validated Cargo package
 version. `CFBundleVersion` comes from an optional positive integer build-number
