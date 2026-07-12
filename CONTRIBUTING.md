@@ -4,7 +4,7 @@ Thanks for helping make disk cleanup safer and easier to understand. DiskDeck is
 
 ## Before you start
 
-- Use an Apple Silicon Mac running macOS 12 or later.
+- Use an Apple Silicon or 64-bit Intel Mac running macOS 12 or later.
 - Install a current stable Rust toolchain with `rustfmt`.
 - Read [AGENTS.md](AGENTS.md) before changing scanner, cleanup, offload, bundle, signing, or UI behavior. Its invariants are part of the product's safety model.
 - Open an issue before a large feature or a new crate dependency so the scope can be agreed first.
@@ -15,6 +15,13 @@ Enable the repository guards once per clone:
 git config core.hooksPath .githooks
 scripts/test-pre-commit.sh
 scripts/test-pre-push.sh
+```
+
+Install both Rust ship targets once. `cargo run` still builds only for your
+current Mac, while `make-app.sh` always builds the exact universal artifact:
+
+```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
 ```
 
 ## Development loop

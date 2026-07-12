@@ -177,7 +177,7 @@ The existing community-file guard continues to reject workflows that invoke
 
 - Exporting signing material to GitHub Actions.
 - Homebrew cask distribution and Sparkle auto-update feeds.
-- Universal Intel binaries; v1 remains Apple Silicon/macOS 12+.
+- Separate per-architecture assets; v1 uses one Universal 2/macOS 12+ ZIP.
 - Mac App Store distribution.
 - Publishing any binary before Developer ID signing and notarization are
   proven end to end.

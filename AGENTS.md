@@ -87,12 +87,19 @@ changing anything; most lines exist because something broke.
 ## Build & ship
 
 ```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin # once per toolchain
 cargo test       # all unit tests must pass before any commit
 ./make-app.sh    # signed local QA + install + explicitly non-public zip
 scripts/release.sh v1.0.0 # public Developer ID/notarization preflight
 cargo run        # dev run only — unbundled binary has its own TCC identity,
                  # so FDA grants made for the .app won't apply to it
 ```
+
+- **Every ship build is Universal 2 with exactly arm64 + x86_64.**
+  `make-app.sh` builds the two fixed Rust targets at
+  `MACOSX_DEPLOYMENT_TARGET=12.0`, merges them before signing, and rejects any
+  thin or extra-slice executable. Keep `cargo run` as the native-only dev loop;
+  never add a thin ship override.
 
 - **Never ship bare `cargo build` output.** Unsigned binaries get a fresh
   TCC identity per build → macOS re-asks all folder permissions. That exact

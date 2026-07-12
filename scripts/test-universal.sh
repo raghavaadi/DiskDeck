@@ -75,4 +75,19 @@ done
 [ "$(grep -Fc 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' "$WORKFLOW")" -ge 2 ] \
     || fail "both native CI jobs must use the pinned checkout action"
 
+grep -Fq 'Apple Silicon or a 64-bit Intel processor' "$ROOT/README.md" \
+    || fail "README does not describe both supported Mac families"
+grep -Fq 'Universal 2 (arm64 + x86_64)' "$ROOT/CHANGELOG.md" \
+    || fail "changelog does not identify the universal v1 artifact"
+grep -Fq 'rustup target add aarch64-apple-darwin x86_64-apple-darwin' \
+    "$ROOT/CONTRIBUTING.md" \
+    || fail "contributor setup does not install both Rust targets"
+for instructions in "$ROOT/AGENTS.md" "$ROOT/CLAUDE.md"; do
+    grep -Fq 'exactly arm64 + x86_64' "$instructions" \
+        || fail "$(basename "$instructions") does not lock the universal ship contract"
+done
+if grep -Fq 'Intel Macs are not supported' "$ROOT/README.md" "$ROOT/CHANGELOG.md"; then
+    fail "public copy still claims Intel Macs are unsupported"
+fi
+
 echo "universal binary checks passed"
