@@ -38,6 +38,10 @@ grep -Fq 'static text "SCAN · EXPLORE · REVIEW · HOLD"' \
     "$ROOT/scripts/ui-smoke.applescript" || \
     fail "UI smoke runner must verify the core safe workflow"
 
+grep -Fq 'click button "Safety & Quick Start"' \
+    "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the Insights guide entry"
+
 grep -q '^ui safety-guide-visible$' "$ROOT/scripts/test-signed-ui.sh" || \
     fail "signed UI smoke must open the Safety & Quick Start guide"
 
@@ -88,6 +92,10 @@ done
 
 grep -q 'my openSummary(appGroup)' "$ROOT/scripts/ui-smoke.applescript" || \
     fail "guided smoke must reset a previously open detail rail"
+
+grep -Fq 'if (exists button "Guide" of appGroup) and (exists button "Insights" of appGroup) then return' \
+    "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "summary detection must use the unique Guide and Insights controls"
 
 grep -q '^RIGHT_CLICK_ATTEMPTS=3$' "$ROOT/scripts/test-signed-ui.sh" || \
     fail "signed UI smoke must retry a lost context-menu click"

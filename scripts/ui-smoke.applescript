@@ -80,7 +80,7 @@ end openInsights
 on openSummary(appGroup)
     tell application "System Events"
         repeat 3 times
-            if exists button "Free up space" of appGroup then return
+            if (exists button "Guide" of appGroup) and (exists button "Insights" of appGroup) then return
             if exists button "← Insights" of appGroup then
                 click button "← Insights" of appGroup
             else if exists button "← Reclaim summary" of appGroup then
@@ -138,7 +138,13 @@ on run argv
                 if not (exists button "← Insights" of appGroup) then error "Safety guide rail did not open." number 1
                 if not (exists static text "Safety & Quick Start" of appGroup) then error "Safety guide heading is unavailable." number 1
                 if not (exists static text "SCAN · EXPLORE · REVIEW · HOLD" of appGroup) then error "Safe workflow explanation is unavailable." number 1
-                return "PASS: Safety & Quick Start available without starting a storage action"
+                click button "← Insights" of appGroup
+                delay 0.5
+                if not (exists button "Safety & Quick Start" of appGroup) then error "Insights guide entry point is unavailable." number 1
+                click button "Safety & Quick Start" of appGroup
+                delay 0.5
+                if not (exists static text "Safety & Quick Start" of appGroup) then error "Insights did not reopen the Safety guide." number 1
+                return "PASS: Safety & Quick Start available from Summary and Insights without starting a storage action"
             else if commandName is "guided-reclaim-visible" then
                 my openSummary(appGroup)
                 repeat with attempt from 1 to 3000
