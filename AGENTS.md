@@ -122,7 +122,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 | `offload.rs` | protected-path policy, external-volume checks, verified copy/move, ledger, worker events | UI eligibility is advisory; the worker must repeat full policy/target/capacity checks, and only a matching source identity may reach `delete_path` |
 | `moves.rs` | lossless local move registry, drive reconciliation, restore preflight and worker | restore is copy → verify → atomic install → target identity recheck → external delete; any occupied or changed path blocks before mutation |
 | `treemap.rs` | squarified layout + paint + zoom-from animation | caps at 40 rects + synthetic "smaller items" aggregate |
-| `app.rs` | egui panels, gauge, telemetry, rec cards, hold-button, ops feed | `request_repaint_after(40ms)` only while scanning/cleaning/animating — don't repaint unconditionally |
+| `app.rs` | egui panels, Safety & Quick Start rail, gauge, telemetry, rec cards, hold-button, ops feed | the guide only routes to existing views; `request_repaint_after(40ms)` only while scanning/cleaning/animating — don't repaint unconditionally |
 | `theme.rs` | colors, fonts, `spaced()` | see the tofu gotcha below |
 
 ## Hard-won gotchas (do not relearn)
@@ -237,5 +237,8 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
   Deep Dive) are shipped. Preserve their independent safety boundaries: do not
   weaken the Safe-only planner, forecast evidence gates, or rule-backed-only
   developer actions in future work.
+- When a user-visible workflow changes, update the Safety & Quick Start copy
+  and its signed AccessKit smoke proof in the same slice. The guide must remain
+  read-only and must never start a scan, select a target, or invoke a mutation.
 - Commit style: imperative subject, body explains the why. `cargo test`
   before every commit.

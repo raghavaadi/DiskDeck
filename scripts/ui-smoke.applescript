@@ -130,6 +130,15 @@ on run argv
                 if not (exists text field 1 of appGroup) then error "Storage Search field is unavailable." number 1
                 if not (exists static text "Searches folders and large files retained in this completed map. Small items remain grouped." of appGroup) then error "Storage Search scope explanation is unavailable." number 1
                 return "PASS: Storage Search available without typing or activating a result"
+            else if commandName is "safety-guide-visible" then
+                my openSummary(appGroup)
+                if not (exists button "Guide" of appGroup) then error "Guide entry point is unavailable." number 1
+                click button "Guide" of appGroup
+                delay 0.5
+                if not (exists button "← Insights" of appGroup) then error "Safety guide rail did not open." number 1
+                if not (exists static text "Safety & Quick Start" of appGroup) then error "Safety guide heading is unavailable." number 1
+                if not (exists static text "SCAN · EXPLORE · REVIEW · HOLD" of appGroup) then error "Safe workflow explanation is unavailable." number 1
+                return "PASS: Safety & Quick Start available without starting a storage action"
             else if commandName is "guided-reclaim-visible" then
                 my openSummary(appGroup)
                 repeat with attempt from 1 to 3000
@@ -239,7 +248,7 @@ on run argv
                 if afterSignature is beforeSignature then error "Back did not change the breadcrumb." number 1
                 return "PASS: Back navigation"
             else
-                error "Usage: ui-smoke.applescript check|storage-search-visible|guided-reclaim-visible|signature|tile-center|menu-visible|reclaim-history-visible|external-drives-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
+                error "Usage: ui-smoke.applescript check|storage-search-visible|safety-guide-visible|guided-reclaim-visible|signature|tile-center|menu-visible|reclaim-history-visible|external-drives-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
             end if
         end tell
     end tell

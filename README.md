@@ -14,6 +14,11 @@ compiler proves there are no data races.
 
 ## Why DiskDeck
 
+- **Start with the safety model, not a manual** — open Guide from the reclaim
+  summary or Safety & Quick Start from Insights for one persistent flight plan:
+  scan, explore, review, then hold. It explains Safe versus Caution, Trash
+  recovery, map actions, and the everyday/developer paths without starting a
+  scan, selecting a target, or changing a file.
 - **The terrain map grows live during the scan.** File sizes bubble up the
   tree through atomics the moment they're statted, and the GPU repaints every
   frame — you watch the disk materialize instead of waiting for a completed
@@ -220,7 +225,10 @@ point) but are never suggested for deletion.
 | click a goal preset / Use custom goal | recalculate the local plan without touching files |
 | click Review this plan | apply only the proposed Safe checkboxes, then inspect every target |
 | click Safe caches / Needs review | open all reclaim targets for manual review |
+| click Guide | open the persistent read-only Safety & Quick Start flight plan |
 | click Insights | open the bounded local-insights hub |
+| click Safety & Quick Start in Insights | learn the everyday and developer paths without starting storage work |
+| click Explore the map in the guide | return to the reclaim summary and visible map |
 | click External drives in Insights | list mounted local drives without starting a scan |
 | click Scan read-only | explicitly build one live external-drive map; no cleanup or move actions are added |
 | click Refresh drives | refresh mount/capacity metadata only; never scan files |

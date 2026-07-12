@@ -28,6 +28,19 @@ sh -n "$ROOT/scripts/test-signed-ui.sh"
 grep -q 'guided-reclaim-visible' "$ROOT/scripts/ui-smoke.applescript" || \
     fail "UI smoke runner must expose guided-reclaim-visible"
 
+grep -q 'commandName is "safety-guide-visible"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must expose safety-guide-visible"
+
+grep -q 'static text "Safety & Quick Start"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the Safety & Quick Start heading"
+
+grep -Fq 'static text "SCAN · EXPLORE · REVIEW · HOLD"' \
+    "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the core safe workflow"
+
+grep -q '^ui safety-guide-visible$' "$ROOT/scripts/test-signed-ui.sh" || \
+    fail "signed UI smoke must open the Safety & Quick Start guide"
+
 grep -q 'static text "DEVELOPER WORKSPACE"' "$ROOT/scripts/ui-smoke.applescript" || \
     fail "UI smoke runner must verify the Developer Deep Dive workspace"
 
