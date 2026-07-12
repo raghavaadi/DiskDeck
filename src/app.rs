@@ -6561,11 +6561,27 @@ impl App {
         egui::Window::new(RichText::new("Storage Search").font(theme::body(13.0)))
             .id(egui::Id::new("storage-search-window"))
             .open(&mut window_open)
+            .title_bar(false)
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.set_width(700.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Storage Search")
+                            .font(theme::display_md(14.0))
+                            .color(palette.ink),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new("⌘F")
+                                .font(theme::mono(9.0))
+                                .color(palette.faint),
+                        );
+                    });
+                });
+                ui.add_space(2.0);
                 ui.label(
                     RichText::new(
                         "Searches folders and large files retained in this completed map. Small items remain grouped.",

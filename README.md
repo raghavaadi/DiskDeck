@@ -18,6 +18,11 @@ compiler proves there are no data races.
   tree through atomics the moment they're statted, and the GPU repaints every
   frame — you watch the disk materialize instead of waiting for a completed
   scan.
+- **Find mapped storage with Command-F** — search the folders ≥10 MB and files
+  ≥100 MB retained by a completed map, ranked by exact name, name prefix,
+  name/path match, and on-disk size. Open a folder directly in the map, Quick
+  Look a large file, or reveal either in Finder. Search is instant and local:
+  it never runs a hidden second scan, and small items stay honestly grouped.
 - **Free up a specific amount safely** — choose 10 GB, 20 GB, 50 GB, or a
   custom goal. DiskDeck builds a deterministic Safe-only plan, explains any
   shortfall, leaves Caution findings unchecked, and reports actual free space
@@ -193,6 +198,9 @@ point) but are never suggested for deletion.
 |---|---|
 | click folder region | open it with an animated zoom |
 | right-click region | open the actions menu: Open, Reveal in Finder, Move to SSD… |
+| press Command-F / click Find | search folders and large files retained by the completed map |
+| click Open map in Search | rebuild the breadcrumb route and open that retained folder |
+| click Quick Look / Reveal in Search | inspect a retained large file or reveal the original path without changing it |
 | click Back | return to the previous folder; disabled at the Data root |
 | click a breadcrumb | jump directly to that ancestor |
 | press Esc | close an open actions menu; otherwise return one folder |
@@ -250,6 +258,7 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 | Suite (in-module `#[cfg(test)]`) | What it proves |
 |---|---|
 | `scan.rs` | counts & aggregation, post-scan compaction folds small dirs, hardlinks counted once, denied dirs counted but non-fatal, nested `node_modules` not double-reported |
+| `search.rs` | completed-tree-only multi-term matching, deterministic ranking/capping, raw-path tie-breaks, denied-state retention, and fail-closed breadcrumb reconstruction |
 | `rules.rs` | KB doctrine on a synthetic tree: tiers, Trash=empty-not-trash, ≥50 MB cache floor + skip-list, Library `node_modules` excluded, safe-before-caution ordering, every rec carries explainers, `~` path prettification |
 | `clean.rs` | quick_du, write-protected delete, empty-keeps-dir, output tailing, command timeout |
 | `reclaim_history.rs` | strict raw-path receipt codec, corrupt-store refusal, 200-record retention, exact Trash identity, current-state classification, no-overwrite restore, worker events, and fixture-only mutation proof |
@@ -296,7 +305,8 @@ roadmap shipped as independently verified slices: regrowth history, verified
 move-back, Growth Watch, Developer Lens, honest APFS accounting, conservative
 app leftovers, the opt-in menu-bar monitor, and read-only duplicate/large-old
 review. Reclaim History later completed the default-to-Trash promise with
-durable local receipts and verified exact-item recovery.
+durable local receipts and verified exact-item recovery. Storage Search then
+made the retained map directly searchable without adding another disk walk.
 
 Fonts: Inter (SIL OFL, see `assets/fonts/LICENSE.txt`) for the native-width UI;
 paths and scan data use egui's built-in Hack.

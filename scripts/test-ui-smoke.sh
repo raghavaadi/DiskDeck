@@ -37,6 +37,19 @@ grep -q 'commandName is "reclaim-history-visible"' "$ROOT/scripts/ui-smoke.apple
 grep -q 'static text "Reclaim History"' "$ROOT/scripts/ui-smoke.applescript" || \
     fail "UI smoke runner must verify the Reclaim History heading"
 
+grep -q 'commandName is "storage-search-visible"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must expose storage-search-visible"
+
+grep -q 'static text "Storage Search"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the Storage Search heading"
+
+grep -Fq 'Searches folders and large files retained in this completed map. Small items remain grouped.' \
+    "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the honest Storage Search scope"
+
+grep -q '^ui storage-search-visible$' "$ROOT/scripts/test-signed-ui.sh" || \
+    fail "signed UI smoke must open Storage Search"
+
 for forbidden in 'Restore' 'Reveal' 'Open Trash' 'Hold to restore'
 do
     grep -Fq "$forbidden" "$ROOT/scripts/test-signed-ui.sh" || \
@@ -56,6 +69,12 @@ if grep -Eiq 'click[^[:cntrl:]]*(Hold to reclaim|Review targets|Review this plan
     "$ROOT/scripts/ui-smoke.applescript" "$ROOT/scripts/test-signed-ui.sh"
 then
     fail "UI smoke runner must not click a cleanup or storage action"
+fi
+
+if grep -Eiq '(keystroke |key code (36|76)|set value of text field|click text field|click button "(Open map|Quick Look|Reveal)")' \
+    "$ROOT/scripts/ui-smoke.applescript" "$ROOT/scripts/test-signed-ui.sh"
+then
+    fail "Storage Search smoke must not type, press Enter, or activate a result action"
 fi
 
 echo "UI smoke tooling checks passed"

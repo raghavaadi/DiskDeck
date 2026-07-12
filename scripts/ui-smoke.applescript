@@ -119,6 +119,14 @@ on run argv
 
             if commandName is "check" then
                 return "PASS: signed UI controls available"
+            else if commandName is "storage-search-visible" then
+                if not (exists button "Find  ⌘F" of appGroup) then error "Storage Search entry point is unavailable. Finish a scan first." number 1
+                click button "Find  ⌘F" of appGroup
+                delay 0.5
+                if not (exists static text "Storage Search" of appGroup) then error "Storage Search heading is unavailable." number 1
+                if not (exists text field 1 of appGroup) then error "Storage Search field is unavailable." number 1
+                if not (exists static text "Searches folders and large files retained in this completed map. Small items remain grouped." of appGroup) then error "Storage Search scope explanation is unavailable." number 1
+                return "PASS: Storage Search available without typing or activating a result"
             else if commandName is "guided-reclaim-visible" then
                 my openSummary(appGroup)
                 repeat with attempt from 1 to 3000
@@ -218,7 +226,7 @@ on run argv
                 if afterSignature is beforeSignature then error "Back did not change the breadcrumb." number 1
                 return "PASS: Back navigation"
             else
-                error "Usage: ui-smoke.applescript check|guided-reclaim-visible|signature|tile-center|menu-visible|reclaim-history-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
+                error "Usage: ui-smoke.applescript check|storage-search-visible|guided-reclaim-visible|signature|tile-center|menu-visible|reclaim-history-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
             end if
         end tell
     end tell

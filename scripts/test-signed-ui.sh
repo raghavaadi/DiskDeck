@@ -24,6 +24,8 @@ ui() {
 /usr/bin/swift "$ROOT/scripts/focus-window.swift" DiskDeck
 sleep 0.5
 ui check
+ui storage-search-visible
+ui escape
 ui guided-reclaim-visible
 ui escape
 before=$(ui signature)

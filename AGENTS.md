@@ -143,6 +143,13 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
   `allocate_new_ui(UiBuilder::new().max_rect(..))`, `FontData::from_static`,
   `Shape::line(points, stroke)` for arcs, `is_pointer_button_down_on()` +
   `stable_dt` for the hold button.
+- **Storage Search is map search, not disk search:** it may inspect only a
+  completed compact tree. Never widen it into Spotlight, a second filesystem
+  traversal, a network request, or persisted query history. Folders below
+  10 MB and files below 100 MB remain grouped; keep that limitation visible.
+  Display matching may be lossy, but Open/Quick Look/Reveal must carry the
+  original `PathBuf`. `begin_scan` must discard every retained search node
+  before replacing the root.
 
 ## The most common task: adding a cleanup rule
 
@@ -169,7 +176,9 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
   open Moved Items and Reclaim History but must never click or hold Restore,
   Reveal, Open Trash, cleanup, move, command, or scan controls. Reclaim-history
   visual fixtures must use only the exact `DiskDeck-QA-Reclaim-History` paths
-  and restore the prior receipt file byte-for-byte afterward.
+  and restore the prior receipt file byte-for-byte afterward. Storage Search
+  smoke may open and close the empty surface but must never type a query, press
+  Enter, or activate Open map, Quick Look, or Reveal.
 
 ## Public repository and commit hygiene
 
@@ -190,7 +199,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 
 ## Repo conventions
 
-- Flat module layout (`scan/rules/reclaim_plan/clean/reclaim_history/history/forecast/transfer/offload/moves/developer/apfs/leftovers/monitor/file_review/treemap/theme/app`), one concern per
+- Flat module layout (`scan/search/rules/reclaim_plan/clean/reclaim_history/history/forecast/transfer/offload/moves/developer/apfs/leftovers/monitor/file_review/treemap/theme/app`), one concern per
   file. No new crate dependencies without strong reason.
 - The direct `objc2` / `objc2-app-kit` / `objc2-foundation` declarations are
   the narrow exception for the native `NSStatusItem`; eframe already ships the
