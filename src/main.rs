@@ -10,6 +10,7 @@ mod leftovers;
 mod monitor;
 mod moves;
 mod offload;
+mod reclaim_plan;
 mod rules;
 mod scan;
 mod theme;
