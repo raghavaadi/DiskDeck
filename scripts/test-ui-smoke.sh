@@ -29,6 +29,18 @@ grep -q 'guided-reclaim-visible' "$ROOT/scripts/ui-smoke.applescript" || \
 grep -q 'static text "DEVELOPER WORKSPACE"' "$ROOT/scripts/ui-smoke.applescript" || \
     fail "UI smoke runner must verify the Developer Deep Dive workspace"
 
+grep -q 'commandName is "reclaim-history-visible"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must expose reclaim-history-visible"
+
+grep -q 'static text "Reclaim History"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the Reclaim History heading"
+
+for forbidden in 'Restore' 'Reveal' 'Open Trash' 'Hold to restore'
+do
+    grep -Fq "$forbidden" "$ROOT/scripts/test-signed-ui.sh" || \
+        fail "signed UI smoke safety contract is missing forbidden label: $forbidden"
+done
+
 grep -q 'my openSummary(appGroup)' "$ROOT/scripts/ui-smoke.applescript" || \
     fail "guided smoke must reset a previously open detail rail"
 

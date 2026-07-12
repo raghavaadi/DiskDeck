@@ -22,6 +22,11 @@ compiler proves there are no data races.
   custom goal. DiskDeck builds a deterministic Safe-only plan, explains any
   shortfall, leaves Caution findings unchecked, and reports actual free space
   separately from estimates or items still waiting in Trash.
+- **Reclaim History and verified Trash recovery** — retain up to 200 local
+  cleanup receipts, explain what happened, and restore an exact unchanged
+  direct Trash move to its original path. Finder-managed moves stay manual;
+  permanent erase, emptied contents, commands, and emptied Trash cannot be
+  undone.
 - **See what grew** — completed scans keep a compact local baseline and show
   the total change plus the largest ≥10 MB growers on the next scan.
 - **Growth Watch and Storage Forecasting** — inspect a 12-scan timeline,
@@ -86,6 +91,12 @@ Safety is structural, not advisory:
 - move history stays local under DiskDeck's Application Support directory;
   raw macOS path bytes round-trip losslessly and corrupt records are never
   overwritten
+- Reclaim History stays local in the strict `DDRH1` format; raw paths round-trip
+  losslessly, corrupt history is never overwritten automatically, and
+  retention removes only old receipts—not files
+- exact Trash restore requires an unchanged device/inode/file kind, a vacant
+  normalized origin, real ancestors, one volume, an acknowledgement, and a
+  separate 900 ms hold; it never overwrites, deletes, copies, or empties Trash
 - Growth Watch choices use a separate bounded, lossless local file; they
   update only when you pin/unpin a measured folder, and measurements advance
   only after a completed scan
@@ -155,6 +166,13 @@ Trash items don't free space until the Trash is emptied — that's what makes
 them recoverable. Select the **Trash** target and reclaim again (or empty it
 in Finder).
 
+**Can DiskDeck undo a cleanup?**
+Open **Insights → Reclaim History**. DiskDeck can restore only a direct Trash
+move whose exact item is still present and unchanged and whose original path is
+empty. If Finder selected the Trash destination, use **Open Trash** and restore
+manually. Emptying Trash, permanent erase, emptied-directory actions, and
+cleanup commands are irreversible.
+
 **What does ≈ next to a size mean?**
 Upper bound, not exact — e.g. Docker's number is everything its VM holds;
 the prune removes only the unused part.
@@ -185,6 +203,9 @@ point) but are never suggested for deletion.
 | click Review this plan | apply only the proposed Safe checkboxes, then inspect every target |
 | click Safe caches / Needs review | open all reclaim targets for manual review |
 | click Insights | open the bounded local-insights hub |
+| click Reclaim History in Insights | inspect local cleanup receipts and current recovery status |
+| click Restore… in Reclaim History | review the exact original/Trash paths and repeated preflight |
+| hold Restore from Trash 0.9 s | atomically restore one acknowledged unchanged Trash receipt without overwriting |
 | click Moved items in Insights | inspect offloaded items and their restore readiness |
 | click Growth Watch in Insights | inspect retained scan trends, recurring growers, and the local storage forecast |
 | click Scan now in Growth Watch | explicitly start a foreground read-only scan when forecast evidence is insufficient |
@@ -222,7 +243,6 @@ checks with the tracked, non-destructive AppleScript workflow documented in
 
 **Maintainers (human or AI): read [AGENTS.md](AGENTS.md) first.** It carries
 the invariants (vetted-commands-only, the never-change bundle id, the
-rename-first trash ordering, tier policy) and the hard-won egui gotchas —
 most notably the font-fallback/tofu lesson and why the icon has no track arc.
 
 ### Tests
@@ -232,6 +252,7 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 | `scan.rs` | counts & aggregation, post-scan compaction folds small dirs, hardlinks counted once, denied dirs counted but non-fatal, nested `node_modules` not double-reported |
 | `rules.rs` | KB doctrine on a synthetic tree: tiers, Trash=empty-not-trash, ≥50 MB cache floor + skip-list, Library `node_modules` excluded, safe-before-caution ordering, every rec carries explainers, `~` path prettification |
 | `clean.rs` | quick_du, write-protected delete, empty-keeps-dir, output tailing, command timeout |
+| `reclaim_history.rs` | strict raw-path receipt codec, corrupt-store refusal, 200-record retention, exact Trash identity, current-state classification, no-overwrite restore, worker events, and fixture-only mutation proof |
 | `history.rs` | lossless snapshot/watchlist codecs, corruption handling, compact-tree capture, comparison threshold/order, recurring-growth timeline, atomic retention without touching unrelated files |
 | `forecast.rs` | compatible-capacity filtering, exact 3/7–5/14–8/30 confidence gates, robust median loss rate, uncertainty range, and honest non-estimate states |
 | `developer.rs` | rebuild-cost labels, source evidence, overlap-safe totals, capped retained-tree project grouping, fixed Xcode inventory, Docker size parsing, fixed-command timeout/failure, and inside-VM non-counting |
@@ -274,7 +295,8 @@ Born 2026-06-12 after a manual cleanup session recovered ~70 GB. The v2
 roadmap shipped as independently verified slices: regrowth history, verified
 move-back, Growth Watch, Developer Lens, honest APFS accounting, conservative
 app leftovers, the opt-in menu-bar monitor, and read-only duplicate/large-old
-review.
+review. Reclaim History later completed the default-to-Trash promise with
+durable local receipts and verified exact-item recovery.
 
 Fonts: Inter (SIL OFL, see `assets/fonts/LICENSE.txt`) for the native-width UI;
 paths and scan data use egui's built-in Hack.

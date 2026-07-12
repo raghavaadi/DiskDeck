@@ -57,6 +57,15 @@ changing anything; most lines exist because something broke.
    locations, fixed `system df --format` arguments, a 3 s timeout, and 64 KiB
    stream caps. Inside-Docker rows are always uncounted; overlapping paths are
    visible but counted once.
+12. **Reclaim receipts are evidence, never authority.** `DDRH1` stores at most
+   200 successful local receipts with lossless raw paths and refuses corrupt
+   overwrite. Exact Trash restore accepts only the stored direct-child path,
+   repeats device/inode/file-kind, normalized-origin, vacant-origin,
+   real-ancestor, and same-volume checks on its worker, then uses one atomic
+   no-replace rename. It never overwrites, deletes, copies, empties Trash,
+   invokes Finder, or turns a receipt path/command into cleanup authority.
+   Receipt and recovery I/O stays off the egui and menu-bar loops; clean,
+   offload, move-back, and Trash restore workers are mutually exclusive.
 
 ## Build & ship
 
@@ -92,6 +101,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 | `rules.rs` | safety KB → `Vec<Rec>`; port of the proven Go doctrine | overlap control: caches with dedicated rules are in the `skip` list so generic `~/Library/Caches` enumeration doesn't double-report; recs carry data-volume paths — fs ops go through `strip_data_root` |
 | `reclaim_plan.rs` | pure Safe-only goal planner and planned-versus-actual outcome model | accepts existing recommendations only; never creates paths, actions, commands, or filesystem work; estimated and pending Trash bytes stay distinct from actual free space |
 | `clean.rs` | trash/delete/empty/command executors + background orchestrator (mpsc events) | **trash = `os::rename` into `~/.Trash` FIRST** — Finder-osascript hangs silently without the Automation TCC grant and is fallback only; `delete_path` chmods-and-retries for write-protected trees (go-modcache style) |
+| `reclaim_history.rs` | strict local receipt codec, state classifier, and exact Trash recovery worker | raw paths stay lossless; corrupt history is never overwritten; only an unchanged exact direct-child Trash item may reach atomic no-replace restore |
 | `developer.rs` | read-only evidence report over vetted recommendations plus bounded retained-tree project/Xcode inventory and fixed Docker detail | discovered paths stay reveal-only; fixed Docker args never accept UI input; inside-VM and overlapping values must not inflate measured totals |
 | `apfs.rs` | fixed-command APFS container and snapshot accounting | never accept UI-supplied command/device input; unavailable purgeable/snapshot bytes stay unavailable and outside reclaimable totals |
 | `leftovers.rs` | read-only large sandbox absence proof | exact bundle-ID-shaped `Library/Containers` entries only; lookup failure means omit; findings stay Caution/reveal-only |
@@ -156,7 +166,10 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
   smallest safe-tier item with the `trash` action (recoverable), or on
   fixture dirs you created. Never test `delete`/`command` on the owner's
   real data. Restore tests likewise use fixture roots only; signed UI smoke may
-  open Moved Items but must never click or hold Restore to Mac.
+  open Moved Items and Reclaim History but must never click or hold Restore,
+  Reveal, Open Trash, cleanup, move, command, or scan controls. Reclaim-history
+  visual fixtures must use only the exact `DiskDeck-QA-Reclaim-History` paths
+  and restore the prior receipt file byte-for-byte afterward.
 
 ## Public repository and commit hygiene
 
@@ -177,7 +190,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 
 ## Repo conventions
 
-- Flat module layout (`scan/rules/reclaim_plan/clean/history/forecast/transfer/offload/moves/developer/apfs/leftovers/monitor/file_review/treemap/theme/app`), one concern per
+- Flat module layout (`scan/rules/reclaim_plan/clean/reclaim_history/history/forecast/transfer/offload/moves/developer/apfs/leftovers/monitor/file_review/treemap/theme/app`), one concern per
   file. No new crate dependencies without strong reason.
 - The direct `objc2` / `objc2-app-kit` / `objc2-foundation` declarations are
   the narrow exception for the native `NSStatusItem`; eframe already ships the

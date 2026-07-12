@@ -140,6 +140,15 @@ on run argv
                 return my largestTileCenter(appGroup)
             else if commandName is "menu-visible" then
                 return my menuIsVisible(appGroup)
+            else if commandName is "reclaim-history-visible" then
+                my openInsights(appGroup)
+                if not (exists button "Reclaim History" of appGroup) then error "Reclaim History control is unavailable." number 1
+                click button "Reclaim History" of appGroup
+                delay 0.5
+                if not (exists button "← Insights" of appGroup) then error "Reclaim History rail did not open." number 1
+                if not (exists static text "Reclaim History" of appGroup) then error "Reclaim History heading is unavailable." number 1
+                if not (exists button "Refresh" of appGroup) then error "Reclaim History Refresh control is unavailable." number 1
+                return "PASS: Reclaim History rail available without restoring or opening Trash"
             else if commandName is "moved-items-visible" then
                 my openInsights(appGroup)
                 if not (exists button "Moved items" of appGroup) then error "Moved items control is unavailable." number 1
@@ -209,7 +218,7 @@ on run argv
                 if afterSignature is beforeSignature then error "Back did not change the breadcrumb." number 1
                 return "PASS: Back navigation"
             else
-                error "Usage: ui-smoke.applescript check|guided-reclaim-visible|signature|tile-center|menu-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
+                error "Usage: ui-smoke.applescript check|guided-reclaim-visible|signature|tile-center|menu-visible|reclaim-history-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
             end if
         end tell
     end tell

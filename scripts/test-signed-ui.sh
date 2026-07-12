@@ -5,6 +5,9 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 APP=/Applications/DiskDeck.app
 APP_EXECUTABLE="$APP/Contents/MacOS/diskdeck"
 APPLESCRIPT="$ROOT/scripts/ui-smoke.applescript"
+# Safety contract consumed by test-ui-smoke.sh. Navigation may never activate
+# any control containing these mutation/Finder labels.
+FORBIDDEN_ACTION_LABELS='Restore Reveal Open Trash Hold to restore'
 
 fail() {
     echo "FAIL: $*" >&2
@@ -55,6 +58,8 @@ after=$(ui signature)
 [ "$before" = "$after" ] || fail "Escape changed breadcrumb: $before -> $after"
 
 ui back
+ui reclaim-history-visible
+ui escape
 ui moved-items-visible
 ui escape
 ui growth-watch-visible
