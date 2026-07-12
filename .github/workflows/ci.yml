@@ -39,6 +39,9 @@ jobs:
       - name: Test distribution artifact guard
         run: scripts/test-package-artifact.sh
 
+      - name: Test release contract
+        run: scripts/test-release.sh
+
       - name: Test staged-content guard
         run: scripts/test-pre-commit.sh
 

@@ -36,6 +36,7 @@ for expected in \
     'cargo fmt -- --check' \
     'scripts/test-ui-smoke.sh' \
     'scripts/test-package-artifact.sh' \
+    'scripts/test-release.sh' \
     'scripts/test-pre-commit.sh' \
     'scripts/test-pre-push.sh' \
     'cargo test --locked'

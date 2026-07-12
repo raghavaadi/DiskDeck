@@ -2,8 +2,8 @@
 # ─────────────────────────────────────────────────────────────────────────
 #  DiskDeck — one-time installer
 #  Run me ONCE (right-click → Open the first time) and macOS never nags
-#  you again: no per-folder permission prompts, no repeat Gatekeeper
-#  dialogs on this app.
+#  you again: no per-folder permission prompts, while preserving the
+#  notarized app's normal Gatekeeper verification.
 # ─────────────────────────────────────────────────────────────────────────
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -17,12 +17,17 @@ if [ ! -d "$APP" ]; then
 fi
 
 echo "▸ Installing DiskDeck → /Applications…"
+echo "▸ Verifying the signed, notarized app with macOS…"
+codesign --verify --deep --strict "$APP"
+if ! spctl --assess --type execute --verbose=2 "$APP"; then
+  echo "✗ Gatekeeper rejected DiskDeck. Download it again from the official" >&2
+  echo "  raghavaadi/DiskDeck GitHub Release; nothing was installed." >&2
+  exit 1
+fi
+
 osascript -e 'quit app "DiskDeck"' 2>/dev/null || true
 rm -rf "$DEST"
 cp -R "$APP" "$DEST"
-
-echo "▸ Clearing the download-quarantine flag (skips the 'unidentified developer' dialog)…"
-xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
 
 echo ""
 echo "▸ ONE permission to grant — then macOS never asks about folders again:"

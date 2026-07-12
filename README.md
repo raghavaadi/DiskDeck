@@ -142,18 +142,23 @@ Safety is structural, not advisory:
 
 ## Installation
 
-**Requirements:** Apple Silicon Mac, macOS 12+. You'll receive
-`DiskDeck.zip` containing the app **and a one-time installer**.
+**Requirements:** Apple Silicon Mac, macOS 12+.
+
+**Public download:** [Latest DiskDeck Release](https://github.com/raghavaadi/DiskDeck/releases/latest).
+Every public app is **Developer ID-signed and notarized**, stapled, checked by
+Gatekeeper, and published with `SHA256SUMS.txt`. The link becomes active only
+after the first build passes that complete release gate; DiskDeck does not
+publish a development-signed substitute.
 
 ### The easy way (recommended)
 
-1. Unzip. You'll see `DiskDeck.app` and `Install DiskDeck.command`.
+1. Download `DiskDeck.zip` from the latest Release and unzip it. You'll see
+   `DiskDeck.app` and `Install DiskDeck.command`.
 2. **Right-click `Install DiskDeck.command` → Open → Open.** (That
    right-click is the only Gatekeeper dance you'll ever do.)
 
-The installer then handles everything that used to cause repeated permission
-prompts: it copies the app to /Applications, clears the download-quarantine
-flag, opens System Settings on the **Full Disk Access** pane (toggle
+The installer verifies the signed, notarized app with Gatekeeper, copies it to
+/Applications, and opens System Settings on the **Full Disk Access** pane (toggle
 **DiskDeck** ON — click **+** and pick it from /Applications if it isn't
 listed), and launches the app. Hit **RESCAN** after granting and you're done —
 **macOS never asks again.**
@@ -177,10 +182,12 @@ listed), and launches the app. Hit **RESCAN** after granting and you're done —
 
 macOS ties permission grants to an app's **code signature + bundle id**.
 Unsigned/ad-hoc builds get a new identity every compile, so the system treats
-each rebuild as a brand-new app and re-asks for every folder. DiskDeck is
-signed with a stable certificate and a fixed bundle id
-(`com.buddyhq.headroom-rs`), and the installer adds the one **Full Disk
-Access** grant that supersedes all per-folder prompts. One grant, forever.
+each rebuild as a brand-new app and re-asks for every folder. Public DiskDeck
+releases use one Developer ID identity and the fixed bundle id
+(`com.buddyhq.headroom-rs`); the installer adds the one **Full Disk Access**
+grant that supersedes all per-folder prompts. Local contributor builds may use
+a separate stable Apple Development identity for QA and therefore do not share
+the public app's permission grant.
 
 ## FAQ
 
@@ -268,16 +275,17 @@ point) but are never suggested for deletion.
 
 ```sh
 cargo test          # scanner, rules KB, cleaner, offload, and treemap tests
-./make-app.sh       # release build + bundle + codesign + install + dist zip
+./make-app.sh       # signed local QA app + install + non-public dist zip
 cargo run           # dev run (unbundled; FDA grants won't apply to it)
 ```
 
-Requires Rust 1.80+. **Ship via `make-app.sh` only** — bare `cargo build`
-output is unsigned, and every unsigned build re-triggers the permission
-prompts described above. The script signs with a stable identity (override
-with `DISKDECK_SIGN_IDENTITY`; the legacy `HEADROOM_SIGN_IDENTITY` override is
-also supported), installs to `/Applications/DiskDeck.app`, and packages
-`dist/DiskDeck.zip` with the recipient installer included.
+Requires Rust 1.80+. Bare `cargo build` output is unsigned, and every unsigned
+build re-triggers the permission prompts described above. `make-app.sh`
+defaults to a stable **local QA** identity (override with
+`DISKDECK_SIGN_IDENTITY`; the legacy `HEADROOM_SIGN_IDENTITY` override is also
+supported), installs to `/Applications/DiskDeck.app`, and produces a ZIP that
+is explicitly not a public release. Only `scripts/release.sh` may enable the
+Developer ID + hardened runtime + notarization distribution mode.
 
 UI contributors can reproduce the maintainers' navigation and context-menu
 checks with the tracked, non-destructive AppleScript workflow documented in
@@ -312,12 +320,21 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 | `moves.rs` | lossless registry codec, atomic bounded storage, legacy-ledger import, health classification, restore preflight, rollback, and worker events |
 | `treemap.rs` | squarified layout conserves area, stays in bounds, degenerate inputs |
 
-### Release checklist
+### Maintainer release gate
 
-1. `cargo test` green
-2. `./make-app.sh` (builds, signs, installs, zips with installer)
-3. Launch, scan, spot-check the reclaim plan and the live map
-4. Share `dist/DiskDeck.zip`
+Public releases require a Keychain-resident `Developer ID Application`
+identity and the named notary profile; secret values never belong in the repo
+or GitHub Actions. The command is deliberately dry-run by default:
+
+```sh
+scripts/release.sh v1.0.0            # non-mutating preflight
+scripts/release.sh v1.0.0 --publish  # notarize, draft, verify, publish
+```
+
+The first command proves clean synchronized `main`, exact-commit CI, version
+and changelog alignment, certificate class, and notary access without changing
+Git or GitHub. `--publish` then tests, builds, notarizes, staples, validates,
+creates a draft, re-downloads and verifies both assets, and only then publishes.
 
 ### Commit safety
 
