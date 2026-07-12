@@ -21,6 +21,7 @@ use crate::offload::{
     can_confirm_offload, check_movable, classify_movable, external_volumes, has_room, run_offload,
     OffloadEvent, OffloadJob, Volume,
 };
+use crate::reclaim_plan::{GoalError, ReclaimPlan, GB};
 use crate::rules::{self, strip_data_root, Action, Rec, Tier};
 use crate::scan::{disk_stats, start_scan, DiskStats, Node, ScanHandle, ScanState, DATA_ROOT};
 use crate::theme;
@@ -84,6 +85,7 @@ struct OffloadDialog {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RailView {
     Summary,
+    GuidedReclaim,
     Reclaim,
     Insights,
     Moved,
@@ -98,7 +100,7 @@ enum RailView {
 fn rail_back_target(view: RailView) -> Option<RailView> {
     match view {
         RailView::Summary => None,
-        RailView::Reclaim | RailView::Insights => Some(RailView::Summary),
+        RailView::GuidedReclaim | RailView::Reclaim | RailView::Insights => Some(RailView::Summary),
         RailView::Moved
         | RailView::Growth
         | RailView::Developer
@@ -122,6 +124,13 @@ pub struct App {
     zoom: Option<(Rect, Instant)>,
     recs: Vec<RecRow>,
     recs_built: bool,
+    recs_revision: u64,
+    guide_goal_bytes: i64,
+    guide_custom_gb: String,
+    guide_goal_error: Option<GoalError>,
+    guide_acknowledged: bool,
+    guide_revision: Option<u64>,
+    guided_goal_for_review: Option<i64>,
     clean_rx: Option<Receiver<CleanEvent>>,
     cleaning: bool,
     hold: f32,
@@ -294,6 +303,13 @@ impl App {
             zoom: None,
             recs: Vec::new(),
             recs_built: false,
+            recs_revision: 0,
+            guide_goal_bytes: 20 * GB,
+            guide_custom_gb: String::new(),
+            guide_goal_error: None,
+            guide_acknowledged: false,
+            guide_revision: None,
+            guided_goal_for_review: None,
             clean_rx: None,
             cleaning: false,
             hold: 0.0,
@@ -355,6 +371,10 @@ impl App {
     }
 
     fn begin_scan(&mut self) {
+        self.recs_revision = self.recs_revision.wrapping_add(1);
+        self.guide_revision = None;
+        self.guide_acknowledged = false;
+        self.guided_goal_for_review = None;
         self.scan = Some(start_scan(DATA_ROOT.into()));
         self.view = None;
         self.crumbs.clear();
@@ -431,6 +451,14 @@ impl App {
             })
             .collect();
         self.recs_built = true;
+        self.guide_goal_bytes = if self.stats.used > 0 {
+            (20 * GB).min(self.stats.used)
+        } else {
+            20 * GB
+        };
+        self.guide_revision = Some(self.recs_revision);
+        self.guide_acknowledged = false;
+        self.guide_goal_error = None;
         self.begin_leftovers(root.clone());
         if should_record_history(state) {
             if let Some(dir) = default_history_dir() {
@@ -847,6 +875,9 @@ impl App {
                 CleanEvent::Done { freed, pending } => {
                     self.cleaning = false;
                     self.clean_rx = None;
+                    self.recs_revision = self.recs_revision.wrapping_add(1);
+                    self.guide_revision = None;
+                    self.guide_acknowledged = false;
                     self.stats = disk_stats();
                     self.stats_at = Instant::now();
                     if freed > 0 {
@@ -1076,6 +1107,22 @@ impl App {
         run_clean(jobs, tx);
     }
 
+    fn accept_guided_plan(&mut self, plan: &ReclaimPlan) {
+        if !can_apply_guided_plan(
+            self.guide_acknowledged,
+            self.guide_revision,
+            self.recs_revision,
+            self.scanning(),
+            plan,
+        ) {
+            return;
+        }
+        apply_guided_plan(&mut self.recs, plan);
+        self.guided_goal_for_review = Some(plan.goal_bytes);
+        self.guide_acknowledged = false;
+        self.rail_view = RailView::Reclaim;
+    }
+
     fn view_node(&self) -> Option<Arc<Node>> {
         self.view
             .clone()
@@ -1162,6 +1209,24 @@ fn should_navigate_back_on_escape(
     escape_pressed && !menu_was_open && !menu_is_open
 }
 
+fn can_apply_guided_plan(
+    acknowledged: bool,
+    draft_revision: Option<u64>,
+    recs_revision: u64,
+    scanning: bool,
+    plan: &crate::reclaim_plan::ReclaimPlan,
+) -> bool {
+    acknowledged && draft_revision == Some(recs_revision) && !scanning && !plan.items.is_empty()
+}
+
+fn apply_guided_plan(rows: &mut [RecRow], plan: &crate::reclaim_plan::ReclaimPlan) {
+    let ids: std::collections::BTreeSet<&str> =
+        plan.items.iter().map(|item| item.id.as_str()).collect();
+    for row in rows {
+        row.checked = ids.contains(row.rec.id.as_str()) && row.rec.tier == Tier::Safe;
+    }
+}
+
 enum MapActionRequest {
     Open {
         node: Arc<Node>,
@@ -1196,6 +1261,73 @@ impl WorkspaceLayout {
 mod tests {
     use super::*;
 
+    fn fixture_rec_row(id: &str, tier: Tier, checked: bool) -> RecRow {
+        RecRow {
+            rec: Rec {
+                id: id.into(),
+                title: id.into(),
+                path: std::path::PathBuf::from(format!("/fixture/{id}")),
+                display: format!("/fixture/{id}"),
+                bytes: 10,
+                tier,
+                desc: "fixture",
+                restore: "fixture",
+                action: Action::Trash,
+                command: None,
+                allow_trash: true,
+                allow_delete: true,
+                note: String::new(),
+                estimate: false,
+            },
+            checked,
+            action: Action::Trash,
+            expanded: false,
+            status: RecStatus::Idle,
+        }
+    }
+
+    fn fixture_plan() -> crate::reclaim_plan::ReclaimPlan {
+        crate::reclaim_plan::ReclaimPlan {
+            goal_bytes: 10,
+            items: vec![crate::reclaim_plan::PlanItem {
+                id: "safe-b".into(),
+                bytes: 10,
+                estimate: false,
+            }],
+            selected_bytes: 10,
+            measured_bytes: 10,
+            estimated_bytes: 0,
+            shortfall_bytes: 0,
+            caution_bytes: 20,
+        }
+    }
+
+    #[test]
+    fn guided_plan_requires_acknowledgement_current_revision_and_items() {
+        let plan = fixture_plan();
+        assert!(can_apply_guided_plan(true, Some(4), 4, false, &plan));
+        assert!(!can_apply_guided_plan(false, Some(4), 4, false, &plan));
+        assert!(!can_apply_guided_plan(true, Some(3), 4, false, &plan));
+        assert!(!can_apply_guided_plan(true, Some(4), 4, true, &plan));
+
+        let mut empty = plan.clone();
+        empty.items.clear();
+        assert!(!can_apply_guided_plan(true, Some(4), 4, false, &empty));
+    }
+
+    #[test]
+    fn guided_plan_checks_only_named_safe_rows() {
+        let mut rows = vec![
+            fixture_rec_row("safe-a", Tier::Safe, true),
+            fixture_rec_row("safe-b", Tier::Safe, true),
+            fixture_rec_row("caution", Tier::Caution, true),
+        ];
+        apply_guided_plan(&mut rows, &fixture_plan());
+        assert!(!rows[0].checked);
+        assert!(rows[1].checked);
+        assert!(!rows[2].checked);
+    }
+
     #[test]
     fn workspace_layout_preserves_map_space_at_minimum_window() {
         let full = Rect::from_min_size(Pos2::ZERO, vec2(1156.0, 564.0));
@@ -1225,6 +1357,10 @@ mod tests {
     #[test]
     fn rail_back_returns_each_detail_view_to_summary() {
         assert_eq!(rail_back_target(RailView::Summary), None);
+        assert_eq!(
+            rail_back_target(RailView::GuidedReclaim),
+            Some(RailView::Summary)
+        );
         assert_eq!(rail_back_target(RailView::Reclaim), Some(RailView::Summary));
         assert_eq!(
             rail_back_target(RailView::Insights),
@@ -2242,6 +2378,10 @@ impl App {
     fn draw_recs(&mut self, ui: &mut egui::Ui, rect: Rect) {
         match self.rail_view {
             RailView::Summary => {
+                self.draw_reclaim_summary(ui, rect);
+                return;
+            }
+            RailView::GuidedReclaim => {
                 self.draw_reclaim_summary(ui, rect);
                 return;
             }
