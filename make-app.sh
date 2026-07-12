@@ -1,13 +1,48 @@
 #!/bin/zsh
-# Build the release binary, bundle "DiskDeck.app", codesign with a stable
-# identity (TCC permission grants survive rebuilds), install to /Applications,
-# and produce a shareable dist zip.
+# Build the release binary and bundle DiskDeck.app. Default mode signs and
+# installs a stable local-QA build so TCC grants survive rebuilds. Explicit
+# distribution mode additionally requires Developer ID signing, hardened
+# runtime, secure timestamp, notarization, stapling, and Gatekeeper proof.
 set -euo pipefail
 cd "$(dirname "$0")"
 export PATH="$HOME/.cargo/bin:$PATH"
+. scripts/release-lib.sh
 
 IDENTITY="${DISKDECK_SIGN_IDENTITY:-${HEADROOM_SIGN_IDENTITY:-Apple Development: aadithyaraghav@gmail.com (ZFZMAP2UJ3)}}"
+VERSION="$(diskdeck_package_version "$PWD")"
+BUILD_NUMBER="${DISKDECK_BUILD_NUMBER:-1}"
+DISTRIBUTION="${DISKDECK_DISTRIBUTION:-0}"
+NO_OPEN="${DISKDECK_NO_OPEN:-0}"
+NOTARY_PROFILE="${DISKDECK_NOTARY_PROFILE:-DiskDeck-Notary}"
 DEST="/Applications/DiskDeck.app"
+
+diskdeck_validate_tag "v$VERSION" || {
+  echo "✗ Cargo package version is not canonical SemVer: $VERSION" >&2
+  exit 1
+}
+printf '%s\n' "$BUILD_NUMBER" | LC_ALL=C grep -Eq '^[1-9][0-9]*$' || {
+  echo "✗ DISKDECK_BUILD_NUMBER must be a positive integer" >&2
+  exit 1
+}
+case "$DISTRIBUTION" in
+  0|1) ;;
+  *) echo "✗ DISKDECK_DISTRIBUTION must be 0 or 1" >&2; exit 1 ;;
+esac
+case "$NO_OPEN" in
+  0|1) ;;
+  *) echo "✗ DISKDECK_NO_OPEN must be 0 or 1" >&2; exit 1 ;;
+esac
+
+if [ "$DISTRIBUTION" = "1" ]; then
+  diskdeck_is_distribution_identity "$IDENTITY" || {
+    echo "✗ public releases require Developer ID Application signing" >&2
+    exit 1
+  }
+  security find-identity -v -p codesigning | grep -Fq "\"$IDENTITY\"" || {
+    echo "✗ Developer ID signing identity is not available in the keychain" >&2
+    exit 1
+  }
+fi
 
 # Assemble and codesign the bundle on an internal APFS volume, never inside the
 # repo. If the checkout lives on an exFAT disk (e.g. an external SSD), macOS
@@ -74,8 +109,8 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>CFBundleExecutable</key><string>diskdeck</string>
     <key>CFBundleIconFile</key><string>DiskDeck</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>0.0.0</string>
+    <key>CFBundleVersion</key><string>0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>LSMinimumSystemVersion</key><string>12.0</string>
     <key>NSHumanReadableCopyright</key><string>See where your disk went. Take it back.</string>
@@ -83,19 +118,40 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 </plist>
 EOF
 
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
+
 if [ "$ADAPTIVE_ICON" = "1" ]; then
   /usr/libexec/PlistBuddy -c 'Add :CFBundleIconName string AppIcon' "$APP/Contents/Info.plist"
 fi
 
-codesign --force --deep --sign "$IDENTITY" "$APP"
-codesign --verify --strict "$APP" && echo "✓ signed as: $IDENTITY"
+if [ "$DISTRIBUTION" = "1" ]; then
+  codesign --force --deep --options runtime --timestamp --sign "$IDENTITY" "$APP"
+else
+  codesign --force --deep --sign "$IDENTITY" "$APP"
+fi
+codesign --verify --deep --strict "$APP" && echo "✓ signed as: $IDENTITY"
+
+if [ "$DISTRIBUTION" = "1" ]; then
+  NOTARY_ARCHIVE="$BUILD/notary-upload.zip"
+  COPYFILE_DISABLE=1 ditto --norsrc --noextattr -c -k --keepParent \
+    "$APP" "$NOTARY_ARCHIVE"
+  xcrun notarytool submit "$NOTARY_ARCHIVE" \
+    --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$APP"
+  xcrun stapler validate "$APP"
+  codesign --verify --deep --strict "$APP"
+  echo "✓ notarized and stapled"
+fi
 
 FIRST_INSTALL=0
-[ -d "$DEST" ] || FIRST_INSTALL=1
-osascript -e 'quit app "DiskDeck"' 2>/dev/null || true
-rm -rf "$DEST"
-cp -R "$APP" "$DEST"
-echo "✓ installed → $DEST"
+if [ "$DISTRIBUTION" = "0" ]; then
+  [ -d "$DEST" ] || FIRST_INSTALL=1
+  osascript -e 'quit app "DiskDeck"' 2>/dev/null || true
+  rm -rf "$DEST"
+  cp -R "$APP" "$DEST"
+  echo "✓ installed → $DEST"
+fi
 
 # shareable bundle: app + one-time installer that handles Gatekeeper +
 # the single Full Disk Access grant for recipients
@@ -111,16 +167,25 @@ rm -f "dist/DiskDeck.zip"
 COPYFILE_DISABLE=1 ditto --norsrc --noextattr -c -k --keepParent \
   "$BUILD/stage/DiskDeck" "dist/DiskDeck.zip"
 scripts/check-dist.sh "dist/DiskDeck.zip"
-echo "✓ shareable → dist/DiskDeck.zip (app + installer)"
+if [ "$DISTRIBUTION" = "1" ]; then
+  scripts/check-release-artifact.sh "dist/DiskDeck.zip" "$VERSION"
+  echo "✓ public artifact → dist/DiskDeck.zip (notarized app + installer)"
+else
+  echo "✓ local QA artifact → dist/DiskDeck.zip (not for public release)"
+fi
 
-open "$DEST"
+if [ "$DISTRIBUTION" = "0" ] && [ "$NO_OPEN" = "0" ]; then
+  open "$DEST"
+fi
 
 # permissions are keyed to bundle id + signature (both stable here), so any
 # grant survives rebuilds — but the very first install needs it made once
-if [ "$FIRST_INSTALL" = "1" ]; then
+if [ "$DISTRIBUTION" = "0" ] && [ "$FIRST_INSTALL" = "1" ]; then
   echo ""
   echo "▸ FIRST INSTALL: grant Full Disk Access once (System Settings just"
   echo "  opened) — toggle ON “DiskDeck”, then RESCAN in the app."
   echo "  That single grant replaces all per-folder prompts, permanently."
-  open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+  if [ "$NO_OPEN" = "0" ]; then
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+  fi
 fi

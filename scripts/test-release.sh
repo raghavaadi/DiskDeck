@@ -75,4 +75,48 @@ fi
 assert_fail diskdeck_extract_release_notes \
     "$TMP/CHANGELOG.md" v2.0.0 "$TMP/missing.md"
 
-echo "release policy checks passed"
+BUNDLER="$ROOT/make-app.sh"
+RELEASE_CHECKER="$ROOT/scripts/check-release-artifact.sh"
+
+[ -f "$RELEASE_CHECKER" ] \
+    || fail "missing scripts/check-release-artifact.sh"
+
+for required in \
+    'scripts/release-lib.sh' \
+    'DISKDECK_DISTRIBUTION' \
+    'DISKDECK_BUILD_NUMBER' \
+    'DISKDECK_NO_OPEN' \
+    '--options runtime' \
+    '--timestamp' \
+    'notarytool submit' \
+    'stapler staple' \
+    'stapler validate'
+do
+    grep -Fq -- "$required" "$BUNDLER" \
+        || fail "make-app.sh is missing distribution contract: $required"
+done
+
+for required in \
+    'scripts/check-dist.sh' \
+    'Authority=Developer ID Application:' \
+    '(runtime)' \
+    'Timestamp=' \
+    'com.buddyhq.headroom-rs' \
+    'stapler validate' \
+    'spctl --assess --type execute'
+do
+    grep -Fq -- "$required" "$RELEASE_CHECKER" \
+        || fail "release artifact checker is missing: $required"
+done
+
+if DISKDECK_DISTRIBUTION=1 \
+   DISKDECK_NO_OPEN=1 \
+   DISKDECK_SIGN_IDENTITY='Apple Development: Test Fixture (TEAM123456)' \
+   "$BUNDLER" > "$TMP/development-identity.out" 2>&1; then
+    fail "distribution mode accepted an Apple Development identity"
+fi
+grep -Fq 'public releases require Developer ID Application' \
+    "$TMP/development-identity.out" \
+    || fail "development identity rejection was not actionable"
+
+echo "release contract checks passed"
