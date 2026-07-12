@@ -19,6 +19,7 @@ mod search;
 mod theme;
 mod transfer;
 mod treemap;
+mod volumes;
 
 use std::sync::Arc;
 

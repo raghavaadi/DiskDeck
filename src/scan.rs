@@ -308,6 +308,7 @@ pub fn find_dirs_named(root: &Arc<Node>, name: &str) -> Vec<Arc<Node>> {
     out
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DiskStats {
     pub total: i64,
     pub free: i64,
@@ -316,8 +317,15 @@ pub struct DiskStats {
 }
 
 pub fn disk_stats() -> DiskStats {
+    disk_stats_for(Path::new(DATA_ROOT))
+}
+
+pub fn disk_stats_for(path: &Path) -> DiskStats {
     use std::ffi::CString;
-    let path = CString::new(DATA_ROOT).unwrap();
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+        return DiskStats::default();
+    };
     let mut st: libc::statfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statfs(path.as_ptr(), &mut st) } != 0 {
         return DiskStats {
@@ -440,5 +448,15 @@ mod tests {
         let found = find_dirs_named(&root, "node_modules");
         assert_eq!(found.len(), 2, "nested node_modules must not double-report");
         let _ = h;
+    }
+
+    #[test]
+    fn disk_stats_for_reports_the_selected_filesystem() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stats = disk_stats_for(tmp.path());
+        assert!(stats.total > 0);
+        assert!(stats.total >= stats.free);
+        assert_eq!(stats.used, stats.total - stats.free);
+        assert!((0.0..=100.0).contains(&stats.used_pct));
     }
 }

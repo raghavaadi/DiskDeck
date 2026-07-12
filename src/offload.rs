@@ -12,6 +12,7 @@ use crate::moves::{registry_path_for_home, upsert_record, MoveRecord};
 #[cfg(test)]
 use crate::transfer::apparent_size;
 use crate::transfer::{ensure_absent, ensure_same_identity, path_identity, verified_ditto_copy};
+use crate::volumes::{mounted_external_volumes, MountedVolume};
 
 /// An attached external volume eligible as an offload target.
 #[derive(Clone)]
@@ -200,31 +201,20 @@ fn eligible_volume(fs_type: &str, read_only: bool, is_symlink: bool) -> bool {
 /// Enumerate attached external volumes eligible as offload targets. Empty vec
 /// means "no SSD present" and the Offload action stays hidden.
 pub fn external_volumes() -> Vec<Volume> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir("/Volumes") else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let mount = entry.path();
-        let is_symlink = entry.file_type().map(|t| t.is_symlink()).unwrap_or(true); // treat unreadable as symlink → skip
-        let Some((fs_type, read_only, free)) = statfs_info(&mount) else {
-            continue;
-        };
-        if !eligible_volume(&fs_type, read_only, is_symlink) {
-            continue;
-        }
-        out.push(Volume {
-            name: mount
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            mount_path: mount,
-            fs_type,
-            free_bytes: free,
-        });
-    }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    offload_volumes(mounted_external_volumes())
+}
+
+fn offload_volumes(volumes: Vec<MountedVolume>) -> Vec<Volume> {
+    volumes
+        .into_iter()
+        .filter(|volume| !volume.read_only)
+        .map(|volume| Volume {
+            name: volume.name,
+            mount_path: volume.mount_path,
+            fs_type: volume.fs_type,
+            free_bytes: volume.free_bytes,
+        })
+        .collect()
 }
 
 /// (fs_type, read_only, free_bytes) for a mount point, or None if statfs fails.
@@ -587,6 +577,38 @@ mod tests {
             );
             assert!(!v.name.is_empty(), "volume name must be non-empty");
         }
+    }
+
+    #[test]
+    fn offload_projection_keeps_only_writable_mounted_volumes() {
+        use crate::volumes::MountedVolume;
+
+        let mounted = vec![
+            MountedVolume {
+                name: "Writable".into(),
+                mount_path: PathBuf::from("/Volumes/Writable"),
+                fs_type: "apfs".into(),
+                total_bytes: 1_000,
+                free_bytes: 750,
+                read_only: false,
+                device_id: 1,
+            },
+            MountedVolume {
+                name: "Read only".into(),
+                mount_path: PathBuf::from("/Volumes/Read only"),
+                fs_type: "apfs".into(),
+                total_bytes: 2_000,
+                free_bytes: 1_500,
+                read_only: true,
+                device_id: 2,
+            },
+        ];
+
+        let projected = offload_volumes(mounted);
+
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].name, "Writable");
+        assert_eq!(projected[0].free_bytes, 750);
     }
 
     #[test]
