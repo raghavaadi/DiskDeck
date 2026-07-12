@@ -26,6 +26,9 @@ sh -n "$ROOT/scripts/test-signed-ui.sh"
 grep -q 'guided-reclaim-visible' "$ROOT/scripts/ui-smoke.applescript" || \
     fail "UI smoke runner must expose guided-reclaim-visible"
 
+grep -q '^RIGHT_CLICK_ATTEMPTS=3$' "$ROOT/scripts/test-signed-ui.sh" || \
+    fail "signed UI smoke must retry a lost context-menu click"
+
 if grep -Eiq 'click[^[:cntrl:]]*(Hold to reclaim|Review targets|Review this plan|Open Trash|Scan again|Scan now|Move to SSD|Reveal in Finder|Restore to Mac|Hold to restore|Start review scan|button "Watch"|button "Unwatch")' \
     "$ROOT/scripts/ui-smoke.applescript" "$ROOT/scripts/test-signed-ui.sh"
 then

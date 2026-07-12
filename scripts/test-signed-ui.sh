@@ -26,17 +26,26 @@ coordinates=$(ui tile-center)
 set -- $coordinates
 [ "$#" -eq 2 ] || fail "invalid tile coordinates: $coordinates"
 
-/usr/bin/swift "$ROOT/scripts/right-click.swift" "$1" "$2"
-
+RIGHT_CLICK_ATTEMPTS=3
 menu_visible=false
-attempt=0
-while [ "$attempt" -lt 20 ]; do
-    if [ "$(ui menu-visible)" = "true" ]; then
-        menu_visible=true
+click_attempt=0
+while [ "$click_attempt" -lt "$RIGHT_CLICK_ATTEMPTS" ]; do
+    /usr/bin/swift "$ROOT/scripts/right-click.swift" "$1" "$2"
+    poll_attempt=0
+    while [ "$poll_attempt" -lt 20 ]; do
+        if [ "$(ui menu-visible)" = "true" ]; then
+            menu_visible=true
+            break
+        fi
+        poll_attempt=$((poll_attempt + 1))
+        sleep 0.1
+    done
+    if [ "$menu_visible" = true ]; then
         break
     fi
-    attempt=$((attempt + 1))
-    sleep 0.1
+    ui escape >/dev/null
+    click_attempt=$((click_attempt + 1))
+    sleep 0.2
 done
 [ "$menu_visible" = true ] || fail "context menu did not expose its fixed labels"
 
