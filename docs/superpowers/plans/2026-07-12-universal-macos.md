@@ -58,7 +58,7 @@ Expected: non-zero with `missing scripts/check-universal-binary.sh`.
 Read `lipo -archs`, normalize it as whitespace-separated words, require word count `2`, and use:
 
 ```sh
-lipo -verify_arch arm64 x86_64 "$EXECUTABLE"
+lipo "$EXECUTABLE" -verify_arch arm64 x86_64
 ```
 
 Fail on a missing file, `lipo` inspection failure, either missing slice, or any third slice. Print the observed architecture list in the error without dumping binary content.
