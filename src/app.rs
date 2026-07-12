@@ -33,6 +33,7 @@ use crate::reclaim_plan::{
 };
 use crate::rules::{self, strip_data_root, Action, Rec, Tier};
 use crate::scan::{disk_stats, start_scan, DiskStats, Node, ScanHandle, ScanState, DATA_ROOT};
+use crate::search::SearchSummary;
 use crate::theme;
 use crate::treemap;
 use egui::{
@@ -212,6 +213,73 @@ struct TrashRestoreDialog {
     acknowledged: bool,
 }
 
+struct SearchDialog {
+    query: String,
+    summary: SearchSummary,
+    selected: usize,
+    request_focus: bool,
+    scan_revision: u64,
+}
+
+impl SearchDialog {
+    fn new(scan_revision: u64) -> Self {
+        Self {
+            query: String::new(),
+            summary: SearchSummary::default(),
+            selected: 0,
+            request_focus: true,
+            scan_revision,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchAction {
+    OpenMap,
+    QuickLook,
+    Reveal,
+}
+
+impl SearchAction {
+    const ALL: [Self; 3] = [Self::OpenMap, Self::QuickLook, Self::Reveal];
+}
+
+fn can_open_storage_search(state: Option<ScanState>, confirmation_open: bool) -> bool {
+    state == Some(ScanState::Done) && !confirmation_open
+}
+
+fn invalidate_storage_search(search: &mut Option<SearchDialog>) {
+    *search = None;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EscapeTarget {
+    Search,
+    TrashRestore,
+    MovedRestore,
+    Rail(RailView),
+    None,
+}
+
+fn escape_target(
+    search_open: bool,
+    trash_restore_open: bool,
+    moved_restore_open: bool,
+    rail_target: Option<RailView>,
+) -> EscapeTarget {
+    if search_open {
+        EscapeTarget::Search
+    } else if trash_restore_open {
+        EscapeTarget::TrashRestore
+    } else if moved_restore_open {
+        EscapeTarget::MovedRestore
+    } else if let Some(target) = rail_target {
+        EscapeTarget::Rail(target)
+    } else {
+        EscapeTarget::None
+    }
+}
+
 pub struct App {
     scan: Option<ScanHandle>,
     view: Option<Arc<Node>>,
@@ -280,6 +348,7 @@ pub struct App {
     file_review_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     file_review: Option<ReviewResult>,
     file_review_error: Option<String>,
+    search_dialog: Option<SearchDialog>,
 }
 
 fn now_hms() -> String {
@@ -650,6 +719,7 @@ impl App {
             file_review_cancel: None,
             file_review: None,
             file_review_error: None,
+            search_dialog: None,
         }
     }
 
@@ -665,6 +735,7 @@ impl App {
     }
 
     fn begin_scan(&mut self) {
+        invalidate_storage_search(&mut self.search_dialog);
         self.recs_revision = self.recs_revision.wrapping_add(1);
         self.guide_revision = None;
         self.guide_acknowledged = false;
@@ -692,6 +763,19 @@ impl App {
         self.scan
             .as_ref()
             .map_or(false, |s| s.state() == ScanState::Running)
+    }
+
+    fn confirmation_dialog_open(&self) -> bool {
+        self.dialog.is_some()
+            || self.restore_dialog.is_some()
+            || self.trash_restore_dialog.is_some()
+    }
+
+    fn open_storage_search(&mut self) {
+        let state = self.scan.as_ref().map(ScanHandle::state);
+        if can_open_storage_search(state, self.confirmation_dialog_open()) {
+            self.search_dialog = Some(SearchDialog::new(self.recs_revision));
+        }
     }
 
     fn scan_done(&self) -> bool {
@@ -1938,6 +2022,61 @@ impl WorkspaceLayout {
 mod tests {
     use super::*;
 
+    #[test]
+    fn storage_search_opens_only_for_an_idle_completed_map() {
+        assert!(can_open_storage_search(Some(ScanState::Done), false));
+        assert!(!can_open_storage_search(None, false));
+        assert!(!can_open_storage_search(Some(ScanState::Running), false));
+        assert!(!can_open_storage_search(Some(ScanState::Aborted), false));
+        assert!(!can_open_storage_search(Some(ScanState::Done), true));
+    }
+
+    #[test]
+    fn storage_search_is_fully_invalidated_before_a_new_scan() {
+        let mut search = Some(SearchDialog {
+            query: "node_modules".into(),
+            summary: crate::search::SearchSummary::default(),
+            selected: 3,
+            request_focus: false,
+            scan_revision: 17,
+        });
+        invalidate_storage_search(&mut search);
+        assert!(search.is_none());
+    }
+
+    #[test]
+    fn storage_search_escape_has_priority_over_every_navigation_layer() {
+        assert_eq!(
+            escape_target(true, true, true, Some(RailView::Insights)),
+            EscapeTarget::Search
+        );
+        assert_eq!(
+            escape_target(false, true, true, Some(RailView::Insights)),
+            EscapeTarget::TrashRestore
+        );
+        assert_eq!(
+            escape_target(false, false, true, Some(RailView::Insights)),
+            EscapeTarget::MovedRestore
+        );
+        assert_eq!(
+            escape_target(false, false, false, Some(RailView::Insights)),
+            EscapeTarget::Rail(RailView::Insights)
+        );
+        assert_eq!(escape_target(false, false, false, None), EscapeTarget::None);
+    }
+
+    #[test]
+    fn storage_search_actions_are_read_only() {
+        assert_eq!(
+            [
+                SearchAction::OpenMap,
+                SearchAction::QuickLook,
+                SearchAction::Reveal,
+            ],
+            SearchAction::ALL
+        );
+    }
+
     fn fixture_rec_row(id: &str, tier: Tier, checked: bool) -> RecRow {
         RecRow {
             rec: Rec {
@@ -2681,18 +2820,39 @@ impl eframe::App for App {
         self.poll_apfs();
         self.poll_leftovers();
         self.poll_file_review();
-        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            if self.trash_restore_dialog.take().is_some() {
-                self.trash_restore_hold = 0.0;
-            } else if self.restore_dialog.take().is_some() {
-                self.restore_hold = 0.0;
-            } else if self.dialog.is_none() {
-                if let Some(target) = rail_back_target(self.rail_view) {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+            self.open_storage_search();
+        }
+        let escape_pressed = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+        let escape_target = escape_target(
+            self.search_dialog.is_some(),
+            self.trash_restore_dialog.is_some(),
+            self.restore_dialog.is_some(),
+            (self.dialog.is_none())
+                .then(|| rail_back_target(self.rail_view))
+                .flatten(),
+        );
+        if escape_pressed && escape_target != EscapeTarget::None {
+            ctx.input_mut(|input| {
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+            });
+            match escape_target {
+                EscapeTarget::Search => invalidate_storage_search(&mut self.search_dialog),
+                EscapeTarget::TrashRestore => {
+                    self.trash_restore_dialog = None;
+                    self.trash_restore_hold = 0.0;
+                }
+                EscapeTarget::MovedRestore => {
+                    self.restore_dialog = None;
+                    self.restore_hold = 0.0;
+                }
+                EscapeTarget::Rail(target) => {
                     if self.rail_view == RailView::Reclaim && !self.cleaning {
                         self.guided_goal_for_review = None;
                     }
                     self.rail_view = target;
                 }
+                EscapeTarget::None => {}
             }
         }
         if self.stats_at.elapsed() > Duration::from_secs(5) {
