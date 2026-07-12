@@ -1,4 +1,5 @@
 use crate::rules::{Rec, Tier};
+use std::collections::BTreeSet;
 
 pub const GB: i64 = 1_000_000_000;
 
@@ -26,6 +27,63 @@ pub struct ReclaimPlan {
     pub estimated_bytes: i64,
     pub shortfall_bytes: i64,
     pub caution_bytes: i64,
+}
+
+pub struct OutcomeTracker {
+    goal_bytes: i64,
+    planned_bytes: i64,
+    planned_estimated_bytes: i64,
+    item_ids: BTreeSet<String>,
+    failed_ids: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReclaimOutcome {
+    pub goal_bytes: i64,
+    pub planned_bytes: i64,
+    pub planned_estimated_bytes: i64,
+    pub actual_freed_bytes: i64,
+    pub pending_trash_bytes: i64,
+    pub goal_shortfall_bytes: i64,
+    pub attempted_items: usize,
+    pub failed_items: usize,
+}
+
+impl OutcomeTracker {
+    pub fn new(
+        goal_bytes: i64,
+        planned_bytes: i64,
+        planned_estimated_bytes: i64,
+        item_ids: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            goal_bytes: goal_bytes.max(0),
+            planned_bytes: planned_bytes.max(0),
+            planned_estimated_bytes: planned_estimated_bytes.max(0),
+            item_ids: item_ids.into_iter().collect(),
+            failed_ids: BTreeSet::new(),
+        }
+    }
+
+    pub fn record_result(&mut self, id: &str, ok: bool) {
+        if !ok && self.item_ids.contains(id) {
+            self.failed_ids.insert(id.to_string());
+        }
+    }
+
+    pub fn finish(self, freed: i64, pending: i64) -> ReclaimOutcome {
+        let actual_freed_bytes = freed.max(0);
+        ReclaimOutcome {
+            goal_bytes: self.goal_bytes,
+            planned_bytes: self.planned_bytes,
+            planned_estimated_bytes: self.planned_estimated_bytes,
+            actual_freed_bytes,
+            pending_trash_bytes: pending.max(0),
+            goal_shortfall_bytes: self.goal_bytes.saturating_sub(actual_freed_bytes).max(0),
+            attempted_items: self.item_ids.len(),
+            failed_items: self.failed_ids.len(),
+        }
+    }
 }
 
 pub fn parse_goal_gb(input: &str, used_bytes: i64) -> Result<i64, GoalError> {
@@ -191,5 +249,36 @@ mod tests {
         let plan = build_plan(&recs, 5 * GB);
         assert!(plan.items.is_empty());
         assert_eq!(plan.shortfall_bytes, 5 * GB);
+    }
+
+    #[test]
+    fn outcome_separates_actual_free_space_from_pending_trash() {
+        let mut tracker =
+            OutcomeTracker::new(20 * GB, 24 * GB, 4 * GB, ["a".to_string(), "b".to_string()]);
+        tracker.record_result("a", true);
+        tracker.record_result("b", false);
+        tracker.record_result("b", false);
+        tracker.record_result("unrelated", false);
+        let outcome = tracker.finish(8 * GB, 6 * GB);
+        assert_eq!(outcome.goal_bytes, 20 * GB);
+        assert_eq!(outcome.planned_bytes, 24 * GB);
+        assert_eq!(outcome.planned_estimated_bytes, 4 * GB);
+        assert_eq!(outcome.actual_freed_bytes, 8 * GB);
+        assert_eq!(outcome.pending_trash_bytes, 6 * GB);
+        assert_eq!(outcome.goal_shortfall_bytes, 12 * GB);
+        assert_eq!(outcome.attempted_items, 2);
+        assert_eq!(outcome.failed_items, 1);
+    }
+
+    #[test]
+    fn outcome_clamps_negative_event_values_and_completed_goals() {
+        let tracker = OutcomeTracker::new(5 * GB, 5 * GB, 0, ["a".to_string()]);
+        let outcome = tracker.finish(-1, -1);
+        assert_eq!(outcome.actual_freed_bytes, 0);
+        assert_eq!(outcome.pending_trash_bytes, 0);
+        assert_eq!(outcome.goal_shortfall_bytes, 5 * GB);
+
+        let outcome = OutcomeTracker::new(5 * GB, 6 * GB, 0, ["a".to_string()]).finish(6 * GB, 0);
+        assert_eq!(outcome.goal_shortfall_bytes, 0);
     }
 }

@@ -3,7 +3,8 @@
 
 use crate::apfs::{self, ApfsAccounting};
 use crate::clean::{
-    fmt_bytes, fmt_count, open_full_disk_access, reveal_in_finder, run_clean, CleanEvent, CleanJob,
+    fmt_bytes, fmt_count, open_full_disk_access, open_trash, reveal_in_finder, run_clean,
+    CleanEvent, CleanJob,
 };
 use crate::developer;
 use crate::file_review::{self, ReviewResult};
@@ -21,7 +22,9 @@ use crate::offload::{
     can_confirm_offload, check_movable, classify_movable, external_volumes, has_room, run_offload,
     OffloadEvent, OffloadJob, Volume,
 };
-use crate::reclaim_plan::{build_plan, parse_goal_gb, GoalError, ReclaimPlan, GB};
+use crate::reclaim_plan::{
+    build_plan, parse_goal_gb, GoalError, OutcomeTracker, ReclaimOutcome, ReclaimPlan, GB,
+};
 use crate::rules::{self, strip_data_root, Action, Rec, Tier};
 use crate::scan::{disk_stats, start_scan, DiskStats, Node, ScanHandle, ScanState, DATA_ROOT};
 use crate::theme;
@@ -131,6 +134,8 @@ pub struct App {
     guide_acknowledged: bool,
     guide_revision: Option<u64>,
     guided_goal_for_review: Option<i64>,
+    active_guided_reclaim: Option<OutcomeTracker>,
+    guided_outcome: Option<ReclaimOutcome>,
     clean_rx: Option<Receiver<CleanEvent>>,
     cleaning: bool,
     hold: f32,
@@ -310,6 +315,8 @@ impl App {
             guide_acknowledged: false,
             guide_revision: None,
             guided_goal_for_review: None,
+            active_guided_reclaim: None,
+            guided_outcome: None,
             clean_rx: None,
             cleaning: false,
             hold: 0.0,
@@ -375,6 +382,8 @@ impl App {
         self.guide_revision = None;
         self.guide_acknowledged = false;
         self.guided_goal_for_review = None;
+        self.active_guided_reclaim = None;
+        self.guided_outcome = None;
         self.scan = Some(start_scan(DATA_ROOT.into()));
         self.view = None;
         self.crumbs.clear();
@@ -840,6 +849,9 @@ impl App {
                     pending,
                     message,
                 } => {
+                    if let Some(tracker) = &mut self.active_guided_reclaim {
+                        tracker.record_result(&id, ok);
+                    }
                     if let Some(row) = self.recs.iter_mut().find(|r| r.rec.id == id) {
                         row.checked = false;
                         row.status = if !ok {
@@ -875,6 +887,10 @@ impl App {
                 CleanEvent::Done { freed, pending } => {
                     self.cleaning = false;
                     self.clean_rx = None;
+                    if let Some(tracker) = self.active_guided_reclaim.take() {
+                        self.guided_outcome = Some(tracker.finish(freed, pending));
+                        self.rail_view = RailView::GuidedReclaim;
+                    }
                     self.recs_revision = self.recs_revision.wrapping_add(1);
                     self.guide_revision = None;
                     self.guide_acknowledged = false;
@@ -1096,6 +1112,20 @@ impl App {
             .collect();
         if jobs.is_empty() {
             return;
+        }
+        if let Some(goal_bytes) = self.guided_goal_for_review.take() {
+            let selected: Vec<&RecRow> = self.recs.iter().filter(|row| row.checked).collect();
+            self.active_guided_reclaim = Some(OutcomeTracker::new(
+                goal_bytes,
+                selected.iter().map(|row| row.rec.bytes).sum(),
+                selected
+                    .iter()
+                    .filter(|row| row.rec.estimate)
+                    .map(|row| row.rec.bytes)
+                    .sum(),
+                selected.iter().map(|row| row.rec.id.clone()),
+            ));
+            self.guided_outcome = None;
         }
         self.ops(
             OpsKind::Amber,
@@ -1790,6 +1820,9 @@ impl eframe::App for App {
                 self.restore_hold = 0.0;
             } else if self.dialog.is_none() {
                 if let Some(target) = rail_back_target(self.rail_view) {
+                    if self.rail_view == RailView::Reclaim && !self.cleaning {
+                        self.guided_goal_for_review = None;
+                    }
                     self.rail_view = target;
                 }
             }
@@ -2551,6 +2584,9 @@ impl App {
                 )
                 .clicked()
             {
+                if !self.cleaning {
+                    self.guided_goal_for_review = None;
+                }
                 self.rail_view = RailView::Summary;
             }
         });
@@ -2796,6 +2832,10 @@ impl App {
 
     fn draw_guided_reclaim(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let palette = theme::palette(ui.ctx());
+        if let Some(outcome) = self.guided_outcome.clone() {
+            self.draw_guided_outcome(ui, rect, &outcome);
+            return;
+        }
         let recs: Vec<Rec> = self.recs.iter().map(|row| row.rec.clone()).collect();
         let plan = build_plan(&recs, self.guide_goal_bytes);
         let current = self.guide_revision == Some(self.recs_revision) && !self.scanning();
@@ -3043,6 +3083,134 @@ impl App {
         }
         if apply {
             self.accept_guided_plan(&plan);
+        }
+    }
+
+    fn draw_guided_outcome(&mut self, ui: &mut egui::Ui, rect: Rect, outcome: &ReclaimOutcome) {
+        let palette = theme::palette(ui.ctx());
+        let content = panel_chrome(
+            ui,
+            rect,
+            "Reclaim result",
+            Some(("measured after cleanup".into(), palette.safe)),
+        );
+        let mut go_back = false;
+        let mut scan_again = false;
+        let mut show_trash = false;
+
+        ui.allocate_new_ui(
+            egui::UiBuilder::new().max_rect(content.shrink2(vec2(12.0, 10.0))),
+            |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("← Back to summary")
+                                        .font(theme::display_md(10.5))
+                                        .color(palette.accent),
+                                )
+                                .frame(false),
+                            )
+                            .clicked()
+                        {
+                            go_back = true;
+                        }
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("Actually freed")
+                                .font(theme::display_md(10.5))
+                                .color(palette.muted),
+                        );
+                        ui.label(
+                            RichText::new(fmt_bytes(outcome.actual_freed_bytes))
+                                .font(theme::display(24.0))
+                                .color(palette.safe),
+                        );
+                        ui.add_space(8.0);
+                        Frame::none()
+                            .fill(palette.surface_raised)
+                            .stroke(Stroke::new(1.0, palette.edge_soft))
+                            .rounding(Rounding::same(9.0))
+                            .inner_margin(Margin::symmetric(11.0, 9.0))
+                            .show(ui, |ui| {
+                                let planned_prefix = if outcome.planned_estimated_bytes > 0 {
+                                    "≈ "
+                                } else {
+                                    ""
+                                };
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Goal {} · planned {planned_prefix}{}",
+                                        fmt_bytes(outcome.goal_bytes),
+                                        fmt_bytes(outcome.planned_bytes)
+                                    ))
+                                    .font(theme::body(10.5))
+                                    .color(palette.ink),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} reviewed item(s) · {} failed",
+                                        outcome.attempted_items, outcome.failed_items
+                                    ))
+                                    .font(theme::body(9.5))
+                                    .color(
+                                        if outcome.failed_items > 0 {
+                                            palette.caution
+                                        } else {
+                                            palette.muted
+                                        },
+                                    ),
+                                );
+                            });
+                        ui.add_space(8.0);
+                        if outcome.goal_shortfall_bytes > 0 {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Still short by {} based on space actually freed.",
+                                    fmt_bytes(outcome.goal_shortfall_bytes)
+                                ))
+                                .font(theme::body(10.0))
+                                .color(palette.caution),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new("Goal reached with measured free space.")
+                                    .font(theme::body(10.0))
+                                    .color(palette.safe),
+                            );
+                        }
+                        if outcome.pending_trash_bytes > 0 {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} is waiting in Trash and is not counted as freed yet.",
+                                    fmt_bytes(outcome.pending_trash_bytes)
+                                ))
+                                .font(theme::body(10.0))
+                                .color(palette.caution),
+                            );
+                            if ui.button("Open Trash").clicked() {
+                                show_trash = true;
+                            }
+                        }
+                        ui.add_space(12.0);
+                        if ui.button("Scan again").clicked() {
+                            scan_again = true;
+                        }
+                    });
+            },
+        );
+
+        if show_trash {
+            open_trash();
+        }
+        if scan_again {
+            self.begin_scan();
+            self.rail_view = RailView::Summary;
+        } else if go_back {
+            self.rail_view = RailView::Summary;
         }
     }
 

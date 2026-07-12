@@ -271,6 +271,15 @@ pub fn reveal_in_finder(p: &Path) {
         .spawn();
 }
 
+pub fn open_trash() {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let _ = Command::new("/usr/bin/open")
+        .arg(PathBuf::from(home).join(".Trash"))
+        .spawn();
+}
+
 pub fn open_full_disk_access() {
     let _ = Command::new("/usr/bin/open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
