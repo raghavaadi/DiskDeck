@@ -130,6 +130,16 @@ on run argv
                 if not (exists text field 1 of appGroup) then error "Storage Search field is unavailable." number 1
                 if not (exists static text "Searches folders and large files retained in this completed map. Small items remain grouped." of appGroup) then error "Storage Search scope explanation is unavailable." number 1
                 return "PASS: Storage Search available without typing or activating a result"
+            else if commandName is "largest-files-visible" then
+                my openInsights(appGroup)
+                if not (exists button "Largest files" of appGroup) then error "Largest files control is unavailable." number 1
+                click button "Largest files" of appGroup
+                delay 0.5
+                if not (exists button "← Insights" of appGroup) then error "Largest files rail did not open." number 1
+                if not (exists static text "Largest files" of appGroup) then error "Largest files heading is unavailable." number 1
+                if not (exists static text "RETAINED MAP · FILES ≥ 100 MB" of appGroup) then error "Largest files coverage boundary is unavailable." number 1
+                if not (exists static text "Read-only · completed Macintosh HD map · files below 100 MB stay grouped" of appGroup) then error "Largest files read-only boundary is unavailable." number 1
+                return "PASS: Largest files available without starting a scan or activating a file action"
             else if commandName is "safety-guide-visible" then
                 my openSummary(appGroup)
                 if not (exists button "Guide" of appGroup) then error "Guide entry point is unavailable." number 1
@@ -138,6 +148,7 @@ on run argv
                 if not (exists button "← Insights" of appGroup) then error "Safety guide rail did not open." number 1
                 if not (exists static text "Safety & Quick Start" of appGroup) then error "Safety guide heading is unavailable." number 1
                 if not (exists static text "SCAN · EXPLORE · REVIEW · HOLD" of appGroup) then error "Safe workflow explanation is unavailable." number 1
+                if not (exists static text "Largest files answers the biggest-file question from the completed map without another scan." of appGroup) then error "Largest files guide explanation is unavailable." number 1
                 click button "← Insights" of appGroup
                 delay 0.5
                 if not (exists button "Safety & Quick Start" of appGroup) then error "Insights guide entry point is unavailable." number 1
@@ -265,7 +276,7 @@ on run argv
                 if afterSignature is beforeSignature then error "Back did not change the breadcrumb." number 1
                 return "PASS: Back navigation"
             else
-                error "Usage: ui-smoke.applescript check|storage-search-visible|safety-guide-visible|guided-reclaim-visible|signature|tile-center|menu-visible|reclaim-history-visible|external-drives-visible|folder-lens-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
+                error "Usage: ui-smoke.applescript check|storage-search-visible|largest-files-visible|safety-guide-visible|guided-reclaim-visible|signature|tile-center|menu-visible|reclaim-history-visible|external-drives-visible|folder-lens-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
             end if
         end tell
     end tell

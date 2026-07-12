@@ -28,6 +28,8 @@ ui safety-guide-visible
 ui escape
 ui storage-search-visible
 ui escape
+ui largest-files-visible
+ui escape
 ui guided-reclaim-visible
 ui escape
 before=$(ui signature)
