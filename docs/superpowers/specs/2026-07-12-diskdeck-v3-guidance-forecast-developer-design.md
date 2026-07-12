@@ -1,6 +1,6 @@
 # DiskDeck v3: Guided Reclaim, Forecasting, and Developer Deep Dive
 
-**Status:** Phases 1–2 shipped; Phase 3 approved
+**Status:** Phases 1–3 shipped
 
 **Date:** 2026-07-12
 
@@ -164,7 +164,7 @@ is produced only when DiskDeck records a completed foreground scan.
   and keeps them readable and non-overlapping at minimum and typical window
   sizes in light and dark appearances.
 
-## Phase 3: Developer Deep Dive
+## Phase 3: Developer Deep Dive — shipped
 
 ### User experience
 
@@ -222,8 +222,15 @@ model.
 - No discovered path becomes executable cleanup input.
 - Tests cover project grouping, ambiguity, overlap removal, rebuild-cost labels,
   fixed-command failures, and deterministic ordering.
-- Signed-app visual verification covers empty, partial, error, and populated
-  states at minimum and typical window sizes.
+- Signed-app visual verification covers loading plus a populated mixed report
+  with a partial Docker measurement at minimum and typical window sizes in
+  light and dark appearances. Deterministic tests cover empty, partial,
+  unavailable, and worker-error state copy; visual error injection stops at the
+  host privacy boundary rather than changing the owner's macOS permissions.
+- The shipped worker starts only after the user opens Developer Lens, caps
+  candidate/marker inspection, and keeps every discovered path reveal-only.
+  The signed populated proof includes an unavailable on-disk Docker footprint
+  alongside live uncounted inside-VM detail.
 
 ## Shared interface decisions
 

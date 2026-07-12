@@ -31,10 +31,12 @@ compiler proves there are no data races.
   spanning seven days; confidence advances from Early (3/7) to Developing
   (5/14) and Reliable (8/30). DiskDeck uses local completed scans only and
   never starts an always-on background scan.
-- **Developer Lens** — opt into a read-only breakdown of Docker, Xcode and
-  simulators, node_modules, package stores, and build tooling. It reuses the
-  deterministic reclaim findings, never uploads project names or paths, and
-  never changes selection defaults.
+- **Developer Deep Dive** — opt into an evidence-first workspace for Docker,
+  Xcode, projects, package stores, and build tooling. Docker's fixed read-only
+  `system df` detail is labelled “inside Docker” and never added to the
+  measured filesystem footprint. Project grouping reuses the retained scan
+  tree, examines at most 200 large candidates, and checks only five immediate
+  standard markers per candidate—never another recursive disk walk.
 - **Honest APFS accounting** — separate measured container capacity/free
   space and local snapshot count from file recommendations. Snapshot byte size
   and purgeable capacity stay explicitly unavailable when macOS does not
@@ -92,6 +94,9 @@ Safety is structural, not advisory:
   snapshots include local volume capacity for forecasting; older DDHIST1
   snapshots remain valid for growth comparisons but do not count as forecast
   evidence
+- Developer Deep Dive is read-only: discovered project output can be revealed
+  but never becomes a cleanup rule, command, selection, or reclaimable claim;
+  only existing vetted recommendations retain their existing actions
 
 ## Installation
 
@@ -183,7 +188,8 @@ point) but are never suggested for deletion.
 | click Moved items in Insights | inspect offloaded items and their restore readiness |
 | click Growth Watch in Insights | inspect retained scan trends, recurring growers, and the local storage forecast |
 | click Scan now in Growth Watch | explicitly start a foreground read-only scan when forecast evidence is insufficient |
-| click Developer Lens in Insights | explain measured developer storage by tool family |
+| click Developer Lens in Insights | open the read-only Docker, Xcode, project, package, and build workspace |
+| click Evidence in Developer Deep Dive | inspect source path, measurement, tier, recovery, overlap handling, and display-only vetted command |
 | click APFS accounting in Insights | inspect container capacity and snapshot accounting |
 | click App leftovers in Insights | inspect evidence-backed sandbox leftovers; reveal only |
 | click Menu-bar monitor in Insights | opt into the native readout, threshold, or login launch |
@@ -228,7 +234,7 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 | `clean.rs` | quick_du, write-protected delete, empty-keeps-dir, output tailing, command timeout |
 | `history.rs` | lossless snapshot/watchlist codecs, corruption handling, compact-tree capture, comparison threshold/order, recurring-growth timeline, atomic retention without touching unrelated files |
 | `forecast.rs` | compatible-capacity filtering, exact 3/7–5/14–8/30 confidence gates, robust median loss rate, uncertainty range, and honest non-estimate states |
-| `developer.rs` | deterministic grouping, stable ordering, totals, Caution counts, and exclusion of ordinary cleanup rows |
+| `developer.rs` | rebuild-cost labels, source evidence, overlap-safe totals, capped retained-tree project grouping, fixed Xcode inventory, Docker size parsing, fixed-command timeout/failure, and inside-VM non-counting |
 | `apfs.rs` | fixed-command APFS plist parsing, bounded values, snapshot count, and timeout/failure behavior |
 | `leftovers.rs` | bundle-ID policy, ≥250 MB floor, exact installed-app absence proof, conservative omission |
 | `monitor.rs` | versioned settings, native AppKit status item, threshold semantics, user LaunchAgent |

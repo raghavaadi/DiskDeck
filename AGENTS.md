@@ -48,6 +48,15 @@ changing anything; most lines exist because something broke.
    `forecast::analyze` must reject invalid, duplicate, and incompatible-volume
    observations. The menu item's five-minute loop may use `statfs` only: never
    read history, traverse the disk, or start a scan from that loop.
+11. **Developer Deep Dive is evidence, not authority.** It may reuse existing
+   `Rec` values and the compact completed-scan tree, but discovered paths are
+   reveal-only and can never create a `Rec`, command, selection, or `CleanJob`.
+   Project discovery is one retained-tree pass, limited to the 200 largest
+   candidates with at most five immediate marker checks each. Docker inspection
+   runs only after the user opens the rail, uses no shell, fixed binary
+   locations, fixed `system df --format` arguments, a 3 s timeout, and 64 KiB
+   stream caps. Inside-Docker rows are always uncounted; overlapping paths are
+   visible but counted once.
 
 ## Build & ship
 
@@ -83,7 +92,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 | `rules.rs` | safety KB → `Vec<Rec>`; port of the proven Go doctrine | overlap control: caches with dedicated rules are in the `skip` list so generic `~/Library/Caches` enumeration doesn't double-report; recs carry data-volume paths — fs ops go through `strip_data_root` |
 | `reclaim_plan.rs` | pure Safe-only goal planner and planned-versus-actual outcome model | accepts existing recommendations only; never creates paths, actions, commands, or filesystem work; estimated and pending Trash bytes stay distinct from actual free space |
 | `clean.rs` | trash/delete/empty/command executors + background orchestrator (mpsc events) | **trash = `os::rename` into `~/.Trash` FIRST** — Finder-osascript hangs silently without the Automation TCC grant and is fallback only; `delete_path` chmods-and-retries for write-protected trees (go-modcache style) |
-| `developer.rs` | read-only Developer Lens classifier over existing recommendations | never invent new commands, totals, or eligibility; ordinary cleanup rows stay out and the default summary remains unchanged |
+| `developer.rs` | read-only evidence report over vetted recommendations plus bounded retained-tree project/Xcode inventory and fixed Docker detail | discovered paths stay reveal-only; fixed Docker args never accept UI input; inside-VM and overlapping values must not inflate measured totals |
 | `apfs.rs` | fixed-command APFS container and snapshot accounting | never accept UI-supplied command/device input; unavailable purgeable/snapshot bytes stay unavailable and outside reclaimable totals |
 | `leftovers.rs` | read-only large sandbox absence proof | exact bundle-ID-shaped `Library/Containers` entries only; lookup failure means omit; findings stay Caution/reveal-only |
 | `monitor.rs` | opt-in native menu-bar free-space readout and user login setting | defaults off; five-minute `statfs` updates only; login LaunchAgent is a separate explicit choice; never start a scan/helper |
@@ -181,8 +190,9 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 - The committed v2 roadmap (safety, regrowth, restore, Growth Watch, Developer
   Lens, APFS, app leftovers, menu monitor, and file review) is shipped. Future
   changes still deliver and verify one independent slice at a time.
-- DiskDeck v3 Phases 1–2 (Guided Reclaim and Storage Forecasting) are shipped.
-  Developer Deep Dive remains a separate future slice; do not weaken the
-  Safe-only planner or forecast evidence gates to accelerate it.
+- DiskDeck v3 Phases 1–3 (Guided Reclaim, Storage Forecasting, and Developer
+  Deep Dive) are shipped. Preserve their independent safety boundaries: do not
+  weaken the Safe-only planner, forecast evidence gates, or rule-backed-only
+  developer actions in future work.
 - Commit style: imperative subject, body explains the why. `cargo test`
   before every commit.
