@@ -5,6 +5,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
 pub const DEFAULT_RESULT_LIMIT: usize = 80;
+pub const DEFAULT_LARGEST_FILE_LIMIT: usize = 80;
 
 #[derive(Clone)]
 pub struct SearchResult {
@@ -17,6 +18,17 @@ pub struct SearchResult {
 pub struct SearchSummary {
     pub total_matches: usize,
     pub results: Vec<SearchResult>,
+}
+
+pub struct LargestFile {
+    pub node: Arc<Node>,
+    pub display_path: String,
+}
+
+#[derive(Default)]
+pub struct LargestFilesSummary {
+    pub total_files: usize,
+    pub results: Vec<LargestFile>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -84,6 +96,37 @@ pub fn search_tree(root: &Arc<Node>, query: &str, limit: usize) -> SearchSummary
     SearchSummary {
         total_matches,
         results: matches,
+    }
+}
+
+pub fn largest_files(root: &Arc<Node>, limit: usize) -> LargestFilesSummary {
+    let mut files = Vec::new();
+    let mut stack = root.kids();
+    while let Some(node) = stack.pop() {
+        if node.is_dir {
+            stack.extend(node.kids());
+        } else {
+            files.push(LargestFile {
+                display_path: node.path.to_string_lossy().into_owned(),
+                node,
+            });
+        }
+    }
+
+    files.sort_by(|left, right| {
+        right.node.bytes().cmp(&left.node.bytes()).then_with(|| {
+            left.node
+                .path
+                .as_os_str()
+                .as_bytes()
+                .cmp(right.node.path.as_os_str().as_bytes())
+        })
+    });
+    let total_files = files.len();
+    files.truncate(limit.min(DEFAULT_LARGEST_FILE_LIMIT));
+    LargestFilesSummary {
+        total_files,
+        results: files,
     }
 }
 
@@ -280,5 +323,49 @@ mod tests {
             children: Mutex::new(Vec::new()),
         });
         assert!(crumbs_for(&fixture().root, &cyclic).is_none());
+    }
+
+    #[test]
+    fn largest_files_keeps_only_files_and_orders_size_then_raw_path() {
+        let fixture = fixture();
+        let biggest = child(&fixture.project, "movie.mov", false, 900_000_000, false);
+        let tie_z = child(&fixture.users, "zeta.dmg", false, 500_000_000, false);
+        let tie_a = child(&fixture.users, "alpha.dmg", false, 500_000_000, false);
+        let _larger_directory = child(&fixture.users, "not-a-file", true, 9_000_000_000, false);
+
+        let summary = largest_files(&fixture.root, DEFAULT_LARGEST_FILE_LIMIT);
+
+        assert_eq!(summary.total_files, 3);
+        assert_eq!(summary.results.len(), 3);
+        assert!(Arc::ptr_eq(&summary.results[0].node, &biggest));
+        assert!(Arc::ptr_eq(&summary.results[1].node, &tie_a));
+        assert!(Arc::ptr_eq(&summary.results[2].node, &tie_z));
+        assert!(summary.results[0].display_path.ends_with("movie.mov"));
+    }
+
+    #[test]
+    fn largest_files_caps_rows_reports_total_and_handles_empty_maps() {
+        let fixture = fixture();
+        for index in 0..(DEFAULT_LARGEST_FILE_LIMIT + 2) {
+            child(
+                &fixture.users,
+                &format!("file-{index:03}.bin"),
+                false,
+                200_000_000 + index as i64,
+                false,
+            );
+        }
+
+        let capped = largest_files(&fixture.root, DEFAULT_LARGEST_FILE_LIMIT + 20);
+        assert_eq!(capped.total_files, DEFAULT_LARGEST_FILE_LIMIT + 2);
+        assert_eq!(capped.results.len(), DEFAULT_LARGEST_FILE_LIMIT);
+
+        let one = largest_files(&fixture.root, 1);
+        assert_eq!(one.total_files, DEFAULT_LARGEST_FILE_LIMIT + 2);
+        assert_eq!(one.results.len(), 1);
+
+        let empty = largest_files(&root("/empty"), DEFAULT_LARGEST_FILE_LIMIT);
+        assert_eq!(empty.total_files, 0);
+        assert!(empty.results.is_empty());
     }
 }

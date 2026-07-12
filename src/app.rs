@@ -34,7 +34,10 @@ use crate::reclaim_plan::{
 };
 use crate::rules::{self, strip_data_root, Action, Rec, Tier};
 use crate::scan::{disk_stats, start_scan, DiskStats, Node, ScanHandle, ScanState, DATA_ROOT};
-use crate::search::{crumbs_for, search_tree, SearchSummary, DEFAULT_RESULT_LIMIT};
+use crate::search::{
+    crumbs_for, largest_files, search_tree, LargestFilesSummary, SearchSummary,
+    DEFAULT_LARGEST_FILE_LIMIT, DEFAULT_RESULT_LIMIT,
+};
 use crate::theme;
 use crate::treemap;
 use crate::volumes::{
@@ -188,6 +191,7 @@ enum RailView {
     Apfs,
     Leftovers,
     Monitor,
+    LargestFiles,
     FileReview,
     ReclaimHistory,
     External,
@@ -205,6 +209,7 @@ fn rail_back_target(view: RailView) -> Option<RailView> {
         | RailView::Apfs
         | RailView::Leftovers
         | RailView::Monitor
+        | RailView::LargestFiles
         | RailView::FileReview
         | RailView::ReclaimHistory
         | RailView::External
@@ -397,6 +402,51 @@ enum SearchAction {
     Reveal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LargestFileAction {
+    QuickLook,
+    Reveal,
+}
+
+impl LargestFileAction {
+    #[cfg(test)]
+    const ALL: [Self; 2] = [Self::QuickLook, Self::Reveal];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LargestFileRowLayout {
+    title: Rect,
+    size: Rect,
+    path: Rect,
+    actions: Rect,
+}
+
+impl LargestFileRowLayout {
+    fn from_rect(row: Rect) -> Self {
+        let top_height = 27.0_f32.min(row.height());
+        let size_width = 82.0_f32.min(row.width());
+        let action_width = 128.0_f32.min(row.width());
+        let top_bottom = row.min.y + top_height;
+        let size = Rect::from_min_max(
+            pos2(row.max.x - size_width, row.min.y),
+            pos2(row.max.x, top_bottom),
+        );
+        let title =
+            Rect::from_min_max(row.min, pos2((size.min.x - 8.0).max(row.min.x), top_bottom));
+        let actions = Rect::from_min_max(pos2(row.max.x - action_width, top_bottom), row.max);
+        let path = Rect::from_min_max(
+            pos2(row.min.x, top_bottom),
+            pos2((actions.min.x - 8.0).max(row.min.x), row.max.y),
+        );
+        Self {
+            title,
+            size,
+            path,
+            actions,
+        }
+    }
+}
+
 impl SearchAction {
     #[cfg(test)]
     const ALL: [Self; 3] = [Self::OpenMap, Self::QuickLook, Self::Reveal];
@@ -436,6 +486,20 @@ fn can_open_storage_search(state: Option<ScanState>, confirmation_open: bool) ->
 
 fn invalidate_storage_search(search: &mut Option<SearchDialog>) {
     *search = None;
+}
+
+fn largest_files_for_completed_map(
+    state: Option<ScanState>,
+    root: Option<&Arc<Node>>,
+) -> Option<LargestFilesSummary> {
+    if state != Some(ScanState::Done) {
+        return None;
+    }
+    root.map(|root| largest_files(root, DEFAULT_LARGEST_FILE_LIMIT))
+}
+
+fn invalidate_largest_files(summary: &mut Option<LargestFilesSummary>) {
+    *summary = None;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -537,6 +601,7 @@ pub struct App {
     file_review_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     file_review: Option<ReviewResult>,
     file_review_error: Option<String>,
+    largest_files: Option<LargestFilesSummary>,
     search_dialog: Option<SearchDialog>,
     map_menu_open: bool,
     external_volumes: Vec<MountedVolume>,
@@ -916,6 +981,7 @@ impl App {
             file_review_cancel: None,
             file_review: None,
             file_review_error: None,
+            largest_files: None,
             search_dialog: None,
             map_menu_open: false,
             external_volumes: Vec::new(),
@@ -948,6 +1014,7 @@ impl App {
             return;
         }
         invalidate_storage_search(&mut self.search_dialog);
+        invalidate_largest_files(&mut self.largest_files);
         self.recs_revision = self.recs_revision.wrapping_add(1);
         self.guide_revision = None;
         self.guide_acknowledged = false;
@@ -2825,6 +2892,52 @@ mod tests {
     }
 
     #[test]
+    fn largest_files_opens_only_from_a_completed_internal_map() {
+        let root = storage_search_root();
+        let file = storage_search_child(&root, "archive.dmg", false, false);
+        file.bytes.store(500_000_000, Relaxed);
+
+        let summary = largest_files_for_completed_map(Some(ScanState::Done), Some(&root)).unwrap();
+        assert_eq!(summary.total_files, 1);
+        assert!(Arc::ptr_eq(&summary.results[0].node, &file));
+        assert!(largest_files_for_completed_map(None, Some(&root)).is_none());
+        assert!(largest_files_for_completed_map(Some(ScanState::Idle), Some(&root)).is_none());
+        assert!(largest_files_for_completed_map(Some(ScanState::Running), Some(&root)).is_none());
+        assert!(largest_files_for_completed_map(Some(ScanState::Aborted), Some(&root)).is_none());
+        assert!(largest_files_for_completed_map(Some(ScanState::Done), None).is_none());
+    }
+
+    #[test]
+    fn largest_files_projection_is_invalidated_before_root_replacement() {
+        let mut summary = Some(crate::search::LargestFilesSummary::default());
+        invalidate_largest_files(&mut summary);
+        assert!(summary.is_none());
+    }
+
+    #[test]
+    fn largest_files_rows_reserve_non_overlapping_size_and_action_columns() {
+        for width in [276.0, 320.0, 420.0] {
+            let row = Rect::from_min_size(Pos2::ZERO, vec2(width, 68.0));
+            let layout = LargestFileRowLayout::from_rect(row);
+            assert!(row.contains_rect(layout.title));
+            assert!(row.contains_rect(layout.size));
+            assert!(row.contains_rect(layout.path));
+            assert!(row.contains_rect(layout.actions));
+            assert!(layout.title.max.x <= layout.size.min.x);
+            assert!(layout.path.max.x <= layout.actions.min.x);
+            assert!(layout.actions.width() >= 124.0);
+        }
+    }
+
+    #[test]
+    fn largest_files_actions_are_read_only() {
+        assert_eq!(
+            LargestFileAction::ALL,
+            [LargestFileAction::QuickLook, LargestFileAction::Reveal]
+        );
+    }
+
+    #[test]
     fn storage_search_escape_has_priority_over_every_navigation_layer() {
         assert_eq!(
             escape_target(true, true, true, false, Some(RailView::Insights)),
@@ -3355,6 +3468,10 @@ mod tests {
             Some(RailView::Insights)
         );
         assert_eq!(rail_back_target(RailView::Folder), Some(RailView::Insights));
+        assert_eq!(
+            rail_back_target(RailView::LargestFiles),
+            Some(RailView::Insights)
+        );
     }
 
     #[test]
@@ -5046,6 +5163,10 @@ impl App {
                 self.draw_menu_monitor(ui, rect);
                 return;
             }
+            RailView::LargestFiles => {
+                self.draw_largest_files(ui, rect);
+                return;
+            }
             RailView::FileReview => {
                 self.draw_file_review(ui, rect);
                 return;
@@ -6185,6 +6306,12 @@ impl App {
                             palette.accent,
                         ),
                         (
+                            "MAP",
+                            "LARGEST FILES",
+                            "Largest files answers the biggest-file question from the completed map without another scan.",
+                            palette.accent,
+                        ),
+                        (
                             "02",
                             "SAFE OR CAUTION",
                             "Safe targets rebuild automatically. Caution targets may need a download or reinstall, so DiskDeck never pre-selects them.",
@@ -6393,6 +6520,11 @@ impl App {
                 RailView::Folder,
             ),
             (
+                "Largest files",
+                "Instant from the completed map · files 100 MB and larger".into(),
+                RailView::LargestFiles,
+            ),
+            (
                 "Reclaim History",
                 if self.reclaim_history.items.is_empty() {
                     "Cleanup receipts and verified Trash recovery".into()
@@ -6472,6 +6604,11 @@ impl App {
         if let Some(target) = open {
             self.rail_view = target;
             match target {
+                RailView::LargestFiles => {
+                    let state = self.scan.as_ref().map(ScanHandle::state);
+                    let root = self.scan.as_ref().map(|scan| &scan.root);
+                    self.largest_files = largest_files_for_completed_map(state, root);
+                }
                 RailView::ReclaimHistory => self.begin_reclaim_history_refresh(),
                 RailView::Moved => self.begin_move_refresh(),
                 RailView::Growth => self.begin_growth_refresh(),
@@ -8177,6 +8314,235 @@ impl App {
         });
         if changed {
             self.apply_monitor_settings(next);
+        }
+    }
+
+    fn draw_largest_files(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let meta = self
+            .largest_files
+            .as_ref()
+            .map(|summary| format!("{} retained file(s)", summary.total_files))
+            .unwrap_or_else(|| "completed map required".into());
+        let content = panel_chrome(ui, rect, "Largest files", Some((meta, palette.faint)));
+        let semantic_title = Rect::from_min_size(rect.min + vec2(10.0, 2.0), vec2(180.0, 28.0));
+        ui.interact(
+            semantic_title,
+            ui.id().with("largest-files-heading"),
+            Sense::hover(),
+        )
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Largest files"));
+        let nav = Rect::from_min_size(
+            content.min + vec2(10.0, 4.0),
+            vec2(content.width() - 20.0, 30.0),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(nav), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("← Insights")
+                            .font(theme::display_md(10.5))
+                            .color(palette.accent),
+                    )
+                    .frame(false),
+                )
+                .on_hover_text("Back to Insights")
+                .clicked()
+            {
+                self.rail_view = RailView::Insights;
+            }
+        });
+
+        let footer = Rect::from_min_max(
+            pos2(content.min.x + 10.0, content.max.y - 48.0),
+            pos2(content.max.x - 10.0, content.max.y - 4.0),
+        );
+        let body = Rect::from_min_max(
+            pos2(content.min.x + 10.0, nav.max.y + 5.0),
+            pos2(content.max.x - 10.0, footer.min.y - 8.0),
+        );
+        let status = Rect::from_min_size(body.min, vec2(body.width(), 34.0));
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(status), |ui| {
+            Frame::none()
+                .fill(palette.accent_dim(12))
+                .stroke(Stroke::new(1.0, palette.edge_soft))
+                .rounding(Rounding::same(8.0))
+                .inner_margin(Margin::symmetric(10.0, 7.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("RETAINED MAP · FILES ≥ 100 MB")
+                            .font(theme::mono(9.5))
+                            .color(palette.accent),
+                    );
+                });
+        });
+
+        let list = Rect::from_min_max(pos2(body.min.x, status.max.y + 8.0), body.max);
+        let summary = self.largest_files.as_ref();
+        let mut requested = None;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list), |ui| match summary {
+            None => {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Finish a Macintosh HD scan to build this instant list.")
+                        .font(theme::body(10.5))
+                        .color(palette.ink),
+                );
+                ui.label(
+                    RichText::new("Opening Largest files never starts a scan.")
+                        .font(theme::body(9.5))
+                        .color(palette.muted),
+                );
+                ui.add_space(10.0);
+                if ui
+                    .add(egui::Button::new(
+                        RichText::new("Return to reclaim summary")
+                            .font(theme::display_md(10.0))
+                            .color(palette.accent),
+                    ))
+                    .clicked()
+                {
+                    self.rail_view = RailView::Summary;
+                }
+            }
+            Some(summary) if summary.results.is_empty() => {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("No retained file is 100 MB or larger.")
+                        .font(theme::body(10.5))
+                        .color(palette.ink),
+                );
+                ui.label(
+                    RichText::new("Smaller files remain grouped in the storage map.")
+                        .font(theme::body(9.5))
+                        .color(palette.muted),
+                );
+            }
+            Some(summary) => {
+                ui.label(
+                    RichText::new(format!(
+                        "SHOWING {} OF {} RETAINED FILES",
+                        summary.results.len(),
+                        summary.total_files
+                    ))
+                    .font(theme::mono(9.0))
+                    .color(palette.faint),
+                );
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for result in &summary.results {
+                            Frame::none()
+                                .fill(palette.surface)
+                                .stroke(Stroke::new(1.0, palette.edge_soft))
+                                .rounding(Rounding::same(8.0))
+                                .inner_margin(Margin::symmetric(9.0, 6.0))
+                                .show(ui, |ui| {
+                                    let (row, _) = ui.allocate_exact_size(
+                                        vec2(ui.available_width(), 58.0),
+                                        Sense::hover(),
+                                    );
+                                    let columns = LargestFileRowLayout::from_rect(row);
+                                    ui.allocate_new_ui(
+                                        egui::UiBuilder::new().max_rect(columns.title),
+                                        |ui| {
+                                            ui.add(
+                                                Label::new(
+                                                    RichText::new(&result.node.name)
+                                                        .font(theme::display_md(11.5))
+                                                        .color(palette.ink),
+                                                )
+                                                .truncate(),
+                                            );
+                                        },
+                                    );
+                                    ui.allocate_new_ui(
+                                        egui::UiBuilder::new().max_rect(columns.size),
+                                        |ui| {
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Min),
+                                                |ui| {
+                                                    ui.label(
+                                                        RichText::new(fmt_bytes(
+                                                            result.node.bytes(),
+                                                        ))
+                                                        .font(theme::mono(10.0))
+                                                        .color(palette.ink),
+                                                    );
+                                                },
+                                            );
+                                        },
+                                    );
+                                    ui.allocate_new_ui(
+                                        egui::UiBuilder::new().max_rect(columns.path),
+                                        |ui| {
+                                            ui.add(
+                                                Label::new(
+                                                    RichText::new(&result.display_path)
+                                                        .font(theme::mono(8.5))
+                                                        .color(palette.muted),
+                                                )
+                                                .truncate(),
+                                            );
+                                        },
+                                    );
+                                    ui.allocate_new_ui(
+                                        egui::UiBuilder::new().max_rect(columns.actions),
+                                        |ui| {
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Min),
+                                                |ui| {
+                                                    if ui
+                                                        .add_sized(
+                                                            vec2(58.0, 24.0),
+                                                            egui::Button::new("Reveal"),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        requested = Some((
+                                                            LargestFileAction::Reveal,
+                                                            result.node.clone(),
+                                                        ));
+                                                    }
+                                                    if ui
+                                                        .add_sized(
+                                                            vec2(62.0, 24.0),
+                                                            egui::Button::new("Quick Look"),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        requested = Some((
+                                                            LargestFileAction::QuickLook,
+                                                            result.node.clone(),
+                                                        ));
+                                                    }
+                                                },
+                                            );
+                                        },
+                                    );
+                                });
+                            ui.add_space(6.0);
+                        }
+                    });
+            }
+        });
+
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(footer), |ui| {
+            ui.separator();
+            ui.label(
+                RichText::new(
+                    "Read-only · completed Macintosh HD map · files below 100 MB stay grouped",
+                )
+                .font(theme::body(9.0))
+                .color(palette.faint),
+            );
+        });
+
+        match requested {
+            Some((LargestFileAction::QuickLook, node)) => self.launch_quick_look(&node.path),
+            Some((LargestFileAction::Reveal, node)) => reveal_in_finder(&node.path),
+            None => {}
         }
     }
 

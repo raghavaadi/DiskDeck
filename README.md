@@ -28,6 +28,11 @@ compiler proves there are no data races.
   name/path match, and on-disk size. Open a folder directly in the map, Quick
   Look a large file, or reveal either in Finder. Search is instant and local:
   it never runs a hidden second scan, and small items stay honestly grouped.
+- **See the largest files immediately** — open Largest files from Insights for
+  a size-ranked list built from the completed Macintosh HD map. It starts no
+  second scan and offers only Quick Look and Reveal in Finder. DiskDeck states
+  the coverage boundary in the view: retained files are 100 MB and larger;
+  smaller files remain grouped in the map.
 - **Explore external drives without changing them** — open External drives
   from Insights, inspect mounted local volumes and capacity, then start one
   explicit read-only live map. Each drive keeps its own breadcrumbs and
@@ -255,6 +260,8 @@ point) but are never suggested for deletion.
 | click Folder Lens in Insights | open the focused local-folder workspace without starting a scan |
 | click Choose a folder… / drop one Finder folder | explicitly build one isolated read-only folder map |
 | click Stop scan in Folder Lens | stop the focused scan and keep its partial map visibly incomplete |
+| click Largest files in Insights | rank files ≥100 MB from the completed Macintosh HD map without another scan |
+| click Quick Look / Reveal in Largest files | inspect the original retained file path without changing it |
 | click Reclaim History in Insights | inspect local cleanup receipts and current recovery status |
 | click Restore… in Reclaim History | review the exact original/Trash paths and repeated preflight |
 | hold Restore from Trash 0.9 s | atomically restore one acknowledged unchanged Trash receipt without overwriting |

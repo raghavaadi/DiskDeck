@@ -67,6 +67,23 @@ grep -Fq 'Searches folders and large files retained in this completed map. Small
 grep -q '^ui storage-search-visible$' "$ROOT/scripts/test-signed-ui.sh" || \
     fail "signed UI smoke must open Storage Search"
 
+grep -q 'commandName is "largest-files-visible"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must expose largest-files-visible"
+
+grep -q 'static text "Largest files"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the Largest files heading"
+
+grep -Fq 'static text "RETAINED MAP · FILES ≥ 100 MB"' \
+    "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the Largest files coverage boundary"
+
+grep -Fq 'Largest files answers the biggest-file question from the completed map without another scan.' \
+    "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "Safety guide smoke must explain the Largest files workflow"
+
+grep -q '^ui largest-files-visible$' "$ROOT/scripts/test-signed-ui.sh" || \
+    fail "signed UI smoke must open Largest files"
+
 grep -q 'commandName is "external-drives-visible"' "$ROOT/scripts/ui-smoke.applescript" || \
     fail "UI smoke runner must expose external-drives-visible"
 
