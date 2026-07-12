@@ -430,11 +430,405 @@ pub fn mark_restored(path: &Path, event_id: u128, restored_at_ms: i64) -> Result
     write_receipts(path, &receipts)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReceiptState {
+    Ready,
+    Missing,
+    OriginOccupied,
+    Changed,
+    ManualOnly,
+    UnsafeOrigin,
+    SymlinkAncestor,
+    CrossDevice,
+    Unavailable,
+    Restored,
+    Permanent,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReceiptItem {
+    pub receipt: Receipt,
+    pub state: ReceiptState,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ReclaimHistory {
+    pub items: Vec<ReceiptItem>,
+    pub freed_bytes: i64,
+    pub pending_bytes: i64,
+    pub recoverable_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RestoreBlock {
+    NotTrash,
+    Missing,
+    OriginOccupied,
+    Changed,
+    ManualOnly,
+    UnsafeOrigin,
+    SymlinkAncestor,
+    CrossDevice,
+    Unavailable,
+    Restored,
+}
+
+impl RestoreBlock {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NotTrash => "This cleanup was permanent and cannot be restored.",
+            Self::Missing => "The recorded item is no longer in Trash.",
+            Self::OriginOccupied => {
+                "The original path is occupied; DiskDeck will not overwrite it."
+            }
+            Self::Changed => "The item in Trash changed and no longer matches this receipt.",
+            Self::ManualOnly => "Finder chose the Trash destination; restore this item manually.",
+            Self::UnsafeOrigin => {
+                "The recorded original path is outside the safe restore boundary."
+            }
+            Self::SymlinkAncestor => "A parent of the original path is a symlink.",
+            Self::CrossDevice => "Trash and the original folder are no longer on one volume.",
+            Self::Unavailable => "DiskDeck cannot verify this restore path right now.",
+            Self::Restored => "This receipt is already marked restored.",
+        }
+    }
+}
+
+fn normalized_absolute(path: &Path) -> bool {
+    let mut components = path.components();
+    if components.next() != Some(std::path::Component::RootDir) {
+        return false;
+    }
+    components.all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+fn safe_origin(origin: &Path, home: &Path) -> bool {
+    if !normalized_absolute(origin) || !normalized_absolute(home) {
+        return false;
+    }
+    if origin == Path::new("/")
+        || origin == Path::new("/Library")
+        || origin == Path::new("/Users")
+        || origin.starts_with("/System")
+        || origin.starts_with("/Applications")
+        || origin == home
+        || origin == home.join("Library")
+        || origin.starts_with(home.join(".Trash"))
+    {
+        return false;
+    }
+    true
+}
+
+fn exact_trash_path(path: &Path, home: &Path) -> bool {
+    normalized_absolute(path)
+        && path.file_name().is_some()
+        && path.parent() == Some(home.join(".Trash").as_path())
+}
+
+fn ancestor_state(parent: &Path) -> Result<u64, ReceiptState> {
+    let mut current = PathBuf::new();
+    for component in parent.components() {
+        current.push(component.as_os_str());
+        let metadata = current.symlink_metadata().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ReceiptState::Unavailable
+            } else {
+                ReceiptState::Unavailable
+            }
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(ReceiptState::SymlinkAncestor);
+        }
+        if !metadata.is_dir() {
+            return Err(ReceiptState::Unavailable);
+        }
+    }
+    parent
+        .symlink_metadata()
+        .map(|metadata| metadata.dev())
+        .map_err(|_| ReceiptState::Unavailable)
+}
+
+fn device_state(trash_dev: u64, parent_dev: u64) -> Option<ReceiptState> {
+    (trash_dev != parent_dev).then_some(ReceiptState::CrossDevice)
+}
+
+pub fn classify(receipt: &Receipt, home: &Path) -> ReceiptState {
+    if receipt.action != ReceiptAction::Trash {
+        return ReceiptState::Permanent;
+    }
+    if receipt.restored_at_ms.is_some() {
+        return ReceiptState::Restored;
+    }
+    if receipt.finder_managed {
+        return ReceiptState::ManualOnly;
+    }
+    let Some(evidence) = &receipt.trash else {
+        return ReceiptState::Unavailable;
+    };
+    if !exact_trash_path(&evidence.path, home) || !safe_origin(&receipt.origin, home) {
+        return ReceiptState::UnsafeOrigin;
+    }
+    let actual = match FileIdentity::at(&evidence.path) {
+        Ok(identity) => identity,
+        Err(_) => match evidence.path.symlink_metadata() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return ReceiptState::Missing;
+            }
+            Ok(_) => return ReceiptState::Changed,
+            Err(_) => return ReceiptState::Unavailable,
+        },
+    };
+    if actual != evidence.identity {
+        return ReceiptState::Changed;
+    }
+    match receipt.origin.symlink_metadata() {
+        Ok(_) => return ReceiptState::OriginOccupied,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return ReceiptState::Unavailable,
+    }
+    let Some(parent) = receipt.origin.parent() else {
+        return ReceiptState::UnsafeOrigin;
+    };
+    let parent_dev = match ancestor_state(parent) {
+        Ok(dev) => dev,
+        Err(state) => return state,
+    };
+    if let Some(state) = device_state(actual.dev, parent_dev) {
+        return state;
+    }
+    ReceiptState::Ready
+}
+
+fn block_for_state(state: &ReceiptState) -> Option<RestoreBlock> {
+    Some(match state {
+        ReceiptState::Ready => return None,
+        ReceiptState::Missing => RestoreBlock::Missing,
+        ReceiptState::OriginOccupied => RestoreBlock::OriginOccupied,
+        ReceiptState::Changed => RestoreBlock::Changed,
+        ReceiptState::ManualOnly => RestoreBlock::ManualOnly,
+        ReceiptState::UnsafeOrigin => RestoreBlock::UnsafeOrigin,
+        ReceiptState::SymlinkAncestor => RestoreBlock::SymlinkAncestor,
+        ReceiptState::CrossDevice => RestoreBlock::CrossDevice,
+        ReceiptState::Unavailable => RestoreBlock::Unavailable,
+        ReceiptState::Restored => RestoreBlock::Restored,
+        ReceiptState::Permanent => RestoreBlock::NotTrash,
+    })
+}
+
+pub fn can_confirm_restore(acknowledged: bool, state: &ReceiptState) -> bool {
+    acknowledged && block_for_state(state).is_none()
+}
+
+pub fn refresh_history(path: &Path, home: &Path) -> Result<ReclaimHistory, String> {
+    let mut receipts = load_receipts(path)?;
+    receipts.sort_by(|a, b| {
+        b.completed_at_ms
+            .cmp(&a.completed_at_ms)
+            .then(b.event_id.cmp(&a.event_id))
+    });
+    let mut history = ReclaimHistory::default();
+    for receipt in receipts {
+        let state = classify(&receipt, home);
+        if receipt.action != ReceiptAction::Trash {
+            history.freed_bytes = history
+                .freed_bytes
+                .saturating_add(receipt.freed_bytes.max(0));
+        }
+        if matches!(
+            state,
+            ReceiptState::Ready
+                | ReceiptState::OriginOccupied
+                | ReceiptState::SymlinkAncestor
+                | ReceiptState::CrossDevice
+        ) {
+            history.pending_bytes = history
+                .pending_bytes
+                .saturating_add(receipt.pending_bytes.max(0));
+        }
+        if state == ReceiptState::Ready {
+            history.recoverable_count = history.recoverable_count.saturating_add(1);
+        }
+        history.items.push(ReceiptItem { receipt, state });
+    }
+    Ok(history)
+}
+
+struct RestorePlan {
+    trash: PathBuf,
+    origin: PathBuf,
+    identity: FileIdentity,
+    bytes: i64,
+}
+
+fn preflight_restore(receipt: &Receipt, home: &Path) -> Result<RestorePlan, RestoreBlock> {
+    let state = classify(receipt, home);
+    if let Some(block) = block_for_state(&state) {
+        return Err(block);
+    }
+    let evidence = receipt.trash.as_ref().ok_or(RestoreBlock::Unavailable)?;
+    Ok(RestorePlan {
+        trash: evidence.path.clone(),
+        origin: receipt.origin.clone(),
+        identity: evidence.identity,
+        bytes: receipt.pending_bytes.max(0),
+    })
+}
+
+#[derive(Clone, Debug)]
+pub struct RestoreJob {
+    pub receipt: Receipt,
+    pub history_path: PathBuf,
+    pub home: PathBuf,
+}
+
+#[derive(Debug)]
+pub enum RestoreEvent {
+    Started {
+        title: String,
+        bytes: i64,
+    },
+    Done {
+        bytes: i64,
+        origin: PathBuf,
+        warning: Option<String>,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+struct RestoreOutcome {
+    bytes: i64,
+    origin: PathBuf,
+    restored_at_ms: i64,
+    warning: Option<String>,
+}
+
+fn perform_restore(job: &RestoreJob) -> Result<RestoreOutcome, String> {
+    let plan =
+        preflight_restore(&job.receipt, &job.home).map_err(|block| block.message().to_string())?;
+    rename_exclusive(&plan.trash, &plan.origin)
+        .map_err(|error| format!("restore item to original path: {error}"))?;
+    let actual = FileIdentity::at(&plan.origin);
+    if actual.as_ref() != Ok(&plan.identity) {
+        let rollback = rename_exclusive(&plan.origin, &plan.trash);
+        return Err(match rollback {
+            Ok(()) => "restored item identity changed; item returned to Trash".into(),
+            Err(error) => format!(
+                "restored item identity changed; return it to Trash manually from {} ({error})",
+                plan.origin.display()
+            ),
+        });
+    }
+    let restored_at_ms = now_ms();
+    let warning = mark_restored(&job.history_path, job.receipt.event_id, restored_at_ms)
+        .err()
+        .map(|error| format!("restored, but reclaim history could not be updated — {error}"));
+    Ok(RestoreOutcome {
+        bytes: plan.bytes,
+        origin: plan.origin,
+        restored_at_ms,
+        warning,
+    })
+}
+
+pub fn run_restore(
+    job: RestoreJob,
+    tx: std::sync::mpsc::Sender<RestoreEvent>,
+) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("trash-restore".into())
+        .spawn(move || {
+            let _ = tx.send(RestoreEvent::Started {
+                title: job.receipt.title.clone(),
+                bytes: job.receipt.pending_bytes.max(0),
+            });
+            match perform_restore(&job) {
+                Ok(outcome) => {
+                    let _ = tx.send(RestoreEvent::Done {
+                        bytes: outcome.bytes,
+                        origin: outcome.origin,
+                        warning: outcome.warning,
+                    });
+                }
+                Err(error) => {
+                    let _ = tx.send(RestoreEvent::Failed { error });
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("start Trash restore worker: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
+
+    struct RestoreFixture {
+        _temp: tempfile::TempDir,
+        home: PathBuf,
+        trash_item: PathBuf,
+        origin: PathBuf,
+        history: PathBuf,
+        receipt: Receipt,
+    }
+
+    impl RestoreFixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let home = fs::canonicalize(temp.path()).unwrap().join("home");
+            let trash = home.join(".Trash");
+            let origin = home.join("Library/Caches/cache");
+            let trash_item = trash.join("cache");
+            let history = temp.path().join("reclaim-history.ddrh");
+            fs::create_dir_all(&trash).unwrap();
+            fs::create_dir_all(origin.parent().unwrap()).unwrap();
+            fs::write(&trash_item, b"fixture").unwrap();
+            let receipt = Receipt {
+                event_id: 101,
+                completed_at_ms: 42,
+                rec_id: "fixture-rule".into(),
+                title: "Fixture cache".into(),
+                origin: origin.clone(),
+                action: ReceiptAction::Trash,
+                freed_bytes: 0,
+                pending_bytes: 7,
+                trash: Some(TrashEvidence {
+                    path: trash_item.clone(),
+                    identity: FileIdentity::at(&trash_item).unwrap(),
+                }),
+                finder_managed: false,
+                restored_at_ms: None,
+            };
+            append_receipt(&history, receipt.clone()).unwrap();
+            Self {
+                _temp: temp,
+                home,
+                trash_item,
+                origin,
+                history,
+                receipt,
+            }
+        }
+
+        fn job(&self) -> RestoreJob {
+            RestoreJob {
+                receipt: self.receipt.clone(),
+                history_path: self.history.clone(),
+                home: self.home.clone(),
+            }
+        }
+
+        fn replace_trash_item(&self) {
+            fs::remove_file(&self.trash_item).unwrap();
+            fs::write(&self.trash_item, b"replacement").unwrap();
+        }
+    }
 
     fn fixture_receipt(origin: PathBuf, action: ReceiptAction) -> Receipt {
         Receipt {
@@ -542,5 +936,224 @@ mod tests {
                 "/fixture/home/Library/Application Support/DiskDeck/reclaim-history.ddrh"
             )
         );
+    }
+
+    #[test]
+    fn classification_distinguishes_ready_missing_occupied_changed_manual_and_restored() {
+        let ready = RestoreFixture::new();
+        assert_eq!(classify(&ready.receipt, &ready.home), ReceiptState::Ready);
+
+        let missing = RestoreFixture::new();
+        fs::remove_file(&missing.trash_item).unwrap();
+        assert_eq!(
+            classify(&missing.receipt, &missing.home),
+            ReceiptState::Missing
+        );
+
+        let occupied = RestoreFixture::new();
+        fs::write(&occupied.origin, b"occupied").unwrap();
+        assert_eq!(
+            classify(&occupied.receipt, &occupied.home),
+            ReceiptState::OriginOccupied
+        );
+
+        let changed = RestoreFixture::new();
+        changed.replace_trash_item();
+        assert_eq!(
+            classify(&changed.receipt, &changed.home),
+            ReceiptState::Changed
+        );
+
+        let manual = RestoreFixture::new();
+        let mut manual_receipt = manual.receipt.clone();
+        manual_receipt.trash = None;
+        manual_receipt.finder_managed = true;
+        assert_eq!(
+            classify(&manual_receipt, &manual.home),
+            ReceiptState::ManualOnly
+        );
+
+        let restored = RestoreFixture::new();
+        let mut restored_receipt = restored.receipt.clone();
+        restored_receipt.restored_at_ms = Some(84);
+        assert_eq!(
+            classify(&restored_receipt, &restored.home),
+            ReceiptState::Restored
+        );
+
+        let permanent = RestoreFixture::new();
+        let mut permanent_receipt = fixture_receipt(
+            permanent.home.join("Library/Caches/permanent"),
+            ReceiptAction::Delete,
+        );
+        permanent_receipt.trash = None;
+        assert_eq!(
+            classify(&permanent_receipt, &permanent.home),
+            ReceiptState::Permanent
+        );
+    }
+
+    #[test]
+    fn classification_blocks_symlink_ancestors_protected_origins_and_cross_device() {
+        let symlinked = RestoreFixture::new();
+        let real_parent = symlinked.home.join("real-parent");
+        let linked_parent = symlinked.home.join("linked-parent");
+        fs::create_dir_all(&real_parent).unwrap();
+        symlink(&real_parent, &linked_parent).unwrap();
+        let mut linked_receipt = symlinked.receipt.clone();
+        linked_receipt.origin = linked_parent.join("cache");
+        assert_eq!(
+            classify(&linked_receipt, &symlinked.home),
+            ReceiptState::SymlinkAncestor
+        );
+
+        let protected = RestoreFixture::new();
+        let mut protected_receipt = protected.receipt.clone();
+        protected_receipt.origin = PathBuf::from("/System/cache");
+        assert_eq!(
+            classify(&protected_receipt, &protected.home),
+            ReceiptState::UnsafeOrigin
+        );
+        assert_eq!(device_state(1, 2), Some(ReceiptState::CrossDevice));
+        assert_eq!(device_state(1, 1), None);
+    }
+
+    #[test]
+    fn refresh_summarizes_only_current_receipt_evidence() {
+        let fixture = RestoreFixture::new();
+        let mut permanent = fixture_receipt(
+            fixture.home.join("Library/Caches/deleted"),
+            ReceiptAction::Delete,
+        );
+        permanent.event_id = 102;
+        permanent.freed_bytes = 11;
+        permanent.pending_bytes = 0;
+        append_receipt(&fixture.history, permanent).unwrap();
+
+        let history = refresh_history(&fixture.history, &fixture.home).unwrap();
+        assert_eq!(history.items.len(), 2);
+        assert_eq!(history.freed_bytes, 11);
+        assert_eq!(history.pending_bytes, 7);
+        assert_eq!(history.recoverable_count, 1);
+        assert_eq!(history.items[0].receipt.event_id, 102);
+    }
+
+    #[test]
+    fn restore_moves_exact_item_back_and_marks_only_its_receipt() {
+        let fixture = RestoreFixture::new();
+        let outcome = perform_restore(&fixture.job()).unwrap();
+        assert_eq!(fs::read(&fixture.origin).unwrap(), b"fixture");
+        assert!(!fixture.trash_item.exists());
+        assert_eq!(outcome.bytes, 7);
+        assert_eq!(
+            load_receipts(&fixture.history).unwrap()[0].restored_at_ms,
+            Some(outcome.restored_at_ms)
+        );
+    }
+
+    #[test]
+    fn restore_refuses_occupied_or_replaced_paths_before_mutation() {
+        let occupied = RestoreFixture::new();
+        fs::write(&occupied.origin, b"occupied").unwrap();
+        assert!(perform_restore(&occupied.job()).is_err());
+        assert_eq!(fs::read(&occupied.origin).unwrap(), b"occupied");
+        assert!(occupied.trash_item.exists());
+
+        let changed = RestoreFixture::new();
+        assert_eq!(
+            classify(&changed.receipt, &changed.home),
+            ReceiptState::Ready
+        );
+        changed.replace_trash_item();
+        assert!(perform_restore(&changed.job()).is_err());
+        assert!(!changed.origin.exists());
+        assert!(changed.trash_item.exists());
+    }
+
+    #[test]
+    fn restore_success_survives_history_write_failure_as_a_warning() {
+        let fixture = RestoreFixture::new();
+        fs::write(&fixture.history, b"corrupt").unwrap();
+        let outcome = perform_restore(&fixture.job()).unwrap();
+        assert!(outcome.warning.unwrap().contains("history"));
+        assert_eq!(fs::read(&fixture.origin).unwrap(), b"fixture");
+    }
+
+    #[test]
+    fn restore_confirmation_and_worker_events_are_fail_closed() {
+        assert!(can_confirm_restore(true, &ReceiptState::Ready));
+        assert!(!can_confirm_restore(false, &ReceiptState::Ready));
+        assert!(!can_confirm_restore(true, &ReceiptState::Changed));
+
+        let fixture = RestoreFixture::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        run_restore(fixture.job(), tx).unwrap();
+        let events: Vec<_> = rx.into_iter().collect();
+        assert!(matches!(events.first(), Some(RestoreEvent::Started { .. })));
+        assert!(matches!(events.last(), Some(RestoreEvent::Done { .. })));
+    }
+
+    #[test]
+    #[ignore = "writes a reversible fixture for signed visual QA"]
+    fn seed_signed_visual_fixture() {
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is required"));
+        let history = PathBuf::from(
+            std::env::var_os("DISKDECK_QA_HISTORY").expect("DISKDECK_QA_HISTORY is required"),
+        );
+        assert_eq!(history, history_path_for_home(&home));
+        assert!(
+            !history.exists(),
+            "back up and remove existing history first"
+        );
+
+        let trash_item = home.join(".Trash/DiskDeck-QA-Reclaim-History");
+        let origin = home.join("Library/Caches/DiskDeck-QA-Reclaim-History");
+        assert!(!trash_item.exists(), "QA Trash fixture already exists");
+        assert!(!origin.exists(), "QA origin fixture already exists");
+        fs::create_dir(&trash_item).unwrap();
+        fs::write(trash_item.join("fixture.txt"), b"DiskDeck visual QA").unwrap();
+        let evidence = TrashEvidence {
+            path: trash_item.clone(),
+            identity: FileIdentity::at(&trash_item).unwrap(),
+        };
+        let receipt = |event_id, title: &str| Receipt {
+            event_id,
+            completed_at_ms: 1_700_000_000_000 + i64::try_from(event_id).unwrap(),
+            rec_id: format!("qa-{event_id}"),
+            title: title.into(),
+            origin: origin.clone(),
+            action: ReceiptAction::Trash,
+            freed_bytes: 0,
+            pending_bytes: 24_000_000,
+            trash: Some(evidence.clone()),
+            finder_managed: false,
+            restored_at_ms: None,
+        };
+
+        let ready = receipt(1, "Ready cache fixture");
+        let mut missing = receipt(2, "Missing Trash fixture");
+        missing.trash.as_mut().unwrap().path = home.join(".Trash/DiskDeck-QA-Missing");
+        let mut changed = receipt(3, "Changed Trash fixture");
+        changed.trash.as_mut().unwrap().identity.ino = changed
+            .trash
+            .as_ref()
+            .unwrap()
+            .identity
+            .ino
+            .saturating_add(1);
+        let mut manual = receipt(4, "Finder-managed fixture");
+        manual.trash = None;
+        manual.finder_managed = true;
+        let mut permanent = receipt(5, "Permanent cleanup fixture");
+        permanent.action = ReceiptAction::Delete;
+        permanent.trash = None;
+        permanent.freed_bytes = 12_000_000;
+        permanent.pending_bytes = 0;
+        let mut restored = receipt(6, "Restored cache fixture");
+        restored.restored_at_ms = Some(1_700_000_000_100);
+
+        for item in [ready, missing, changed, manual, permanent, restored] {
+            append_receipt(&history, item).unwrap();
+        }
     }
 }
