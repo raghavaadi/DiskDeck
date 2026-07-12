@@ -5,6 +5,7 @@ mod app;
 mod clean;
 mod developer;
 mod file_review;
+mod folder_lens;
 mod forecast;
 mod history;
 mod leftovers;
