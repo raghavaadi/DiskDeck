@@ -1,7 +1,7 @@
 # Storage Search — design
 
 **Date:** 2026-07-12
-**Status:** approved for autonomous delivery under the owner's standing direction
+**Status:** delivered and verified locally under the owner's standing direction
 
 ## Why this is next
 
@@ -167,6 +167,32 @@ touch any cleanup/move/restore control.
 Run formatting, every shell guard, `cargo test --locked`, distribution ZIP
 validation, signature validation, signed UI smoke, and the exact GitHub CI run
 before declaring the slice shipped.
+
+### Delivered proof
+
+- `163` active Rust tests pass; the sole ignored test remains the explicit
+  reclaim-history signed-visual fixture seeder.
+- Pure tests cover exact/prefix/name/path ranking, multi-term matching, the
+  80-row cap with full count, raw-path tie-breaks, denied nodes, attached
+  breadcrumbs, detached roots, and defensive cycle refusal. Application tests
+  cover availability, complete invalidation, Escape priority, read-only action
+  classification, fixed row geometry, exact folder navigation, and modal map
+  interaction blocking.
+- The signed app was inspected at 1180 × 740 and 1480 × 952 in light and dark
+  appearance. Empty, one-character, no-match, populated, capped (`80 of 607`),
+  and long-path states were inspected without overlap, tofu, hidden controls,
+  or background tooltip leakage.
+- Command-F focus, Up/Down selection, Enter folder opening, Escape closure,
+  Quick Look of an existing retained large file, and Finder reveal were proven
+  on the signed build. Those actions were read-only; no path was created,
+  moved, renamed, deleted, or selected for cleanup.
+- Signed smoke opens the empty search surface, verifies its semantic heading,
+  field, and scope copy, then closes it without typing or activating a result.
+  The harness polls the opened heading because egui AccessKit exposes the
+  button but omits a Boolean `AXEnabled` value.
+- QA created no fixture or persisted search data. The owner's dark appearance,
+  1480 × 952 window size, original window position, Data-root map, and Summary
+  rail were restored afterward.
 
 ## Documentation and non-goals
 
