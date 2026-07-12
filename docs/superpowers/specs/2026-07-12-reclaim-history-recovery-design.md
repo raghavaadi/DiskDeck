@@ -1,7 +1,7 @@
 # Reclaim History and Recovery — design
 
 **Date:** 2026-07-12
-**Status:** approved for autonomous delivery under the owner's standing direction
+**Status:** delivered and verified locally under the owner's standing direction
 
 ## Why this is next
 
@@ -204,6 +204,26 @@ never exercise the pipeline on the owner's real recommendations or data.
 Run formatting, all shell guards, `cargo test --locked`, the distribution ZIP
 validator, signed UI smoke, and the exact GitHub CI run before declaring the
 slice shipped.
+
+### Delivered proof
+
+- `149` active Rust tests pass; the sole ignored test is the explicit signed-UI
+  fixture seeder.
+- The fixture suite proves exact direct-to-Trash identity capture, no-overwrite
+  restoration, replacement detection, persisted restored state, corrupt-history
+  refusal, and warning-only receipt persistence failures.
+- The signed app was inspected in light and dark appearance at minimum and
+  typical window sizes with both empty and populated history. The populated
+  fixture covered ready, restored, permanent, Finder-managed, changed, and
+  missing states; its confirmation dialog was inspected without activating the
+  hold control.
+- Signed smoke navigates Reclaim History without activating restore, reveal,
+  Open Trash, scan, cleanup, move, or refresh controls. On macOS versions that
+  lazily expose AccessKit until the app owns focus, the harness clicks only the
+  harmless native title bar before running the same non-mutating navigation.
+- QA used only the exact `DiskDeck-QA-Reclaim-History` fixture paths. They were
+  removed after inspection, the prior absent history state was restored, and
+  the owner's dark appearance preference was restored.
 
 ## Documentation
 
