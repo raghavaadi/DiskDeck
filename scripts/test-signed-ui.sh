@@ -19,6 +19,8 @@ ui() {
 }
 
 ui check
+ui guided-reclaim-visible
+ui escape
 before=$(ui signature)
 coordinates=$(ui tile-center)
 set -- $coordinates

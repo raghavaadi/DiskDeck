@@ -2797,32 +2797,37 @@ impl App {
         let button =
             Rect::from_min_max(footer.min + vec2(10.0, 66.0), footer.max - vec2(10.0, 10.0));
         let enabled = self.recs_built;
-        let response = ui.interact(button, ui.id().with("free-up-space"), Sense::click());
         let button_color = if ui.visuals().dark_mode {
             palette.safe
         } else {
             palette.accent
         };
-        ui.painter().rect_filled(
-            button,
-            Rounding::same(8.0),
-            button_color.gamma_multiply(if enabled { 1.0 } else { 0.35 }),
-        );
-        ui.painter().text(
-            button.center(),
-            Align2::CENTER_CENTER,
-            if enabled {
-                "Free up space"
-            } else {
-                "Scanning for targets…"
-            },
-            theme::display_md(11.0),
-            if ui.visuals().dark_mode {
-                Color32::from_rgb(0x08, 0x2c, 0x29)
-            } else {
-                Color32::WHITE
-            },
-        );
+        let response = ui
+            .allocate_new_ui(egui::UiBuilder::new().max_rect(button), |ui| {
+                ui.add_enabled_ui(enabled, |ui| {
+                    ui.add_sized(
+                        ui.available_size(),
+                        egui::Button::new(
+                            RichText::new(if enabled {
+                                "Free up space"
+                            } else {
+                                "Scanning for targets…"
+                            })
+                            .font(theme::display_md(11.0))
+                            .color(if ui.visuals().dark_mode {
+                                Color32::from_rgb(0x08, 0x2c, 0x29)
+                            } else {
+                                Color32::WHITE
+                            }),
+                        )
+                        .fill(button_color)
+                        .stroke(Stroke::new(1.0, button_color))
+                        .rounding(Rounding::same(8.0)),
+                    )
+                })
+                .inner
+            })
+            .inner;
         if enabled && response.clicked() {
             self.guide_revision = Some(self.recs_revision);
             self.guide_acknowledged = false;

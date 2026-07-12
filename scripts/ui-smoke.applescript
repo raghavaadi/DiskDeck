@@ -103,6 +103,20 @@ on run argv
 
             if commandName is "check" then
                 return "PASS: signed UI controls available"
+            else if commandName is "guided-reclaim-visible" then
+                repeat with attempt from 1 to 3000
+                    if exists button "Free up space" of appGroup then exit repeat
+                    delay 0.1
+                end repeat
+                if not (exists button "Free up space" of appGroup) then error "Guided Reclaim entry point is unavailable." number 1
+                click button "Free up space" of appGroup
+                delay 0.5
+                if not (exists button "← Reclaim summary" of appGroup) then error "Guided Reclaim rail did not open." number 1
+                if not (exists button "10 GB" of appGroup) then error "10 GB goal is unavailable." number 1
+                if not (exists button "20 GB" of appGroup) then error "20 GB goal is unavailable." number 1
+                if not (exists button "50 GB" of appGroup) then error "50 GB goal is unavailable." number 1
+                if not (exists button "Review this plan" of appGroup) then error "Guided plan review control is unavailable." number 1
+                return "PASS: Guided Reclaim rail available without applying or cleaning"
             else if commandName is "signature" then
                 return my breadcrumbSignature(appGroup)
             else if commandName is "tile-center" then
@@ -174,7 +188,7 @@ on run argv
                 if afterSignature is beforeSignature then error "Back did not change the breadcrumb." number 1
                 return "PASS: Back navigation"
             else
-                error "Usage: ui-smoke.applescript check|signature|tile-center|menu-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
+                error "Usage: ui-smoke.applescript check|guided-reclaim-visible|signature|tile-center|menu-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
             end if
         end tell
     end tell

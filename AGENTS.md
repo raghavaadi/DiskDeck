@@ -37,6 +37,11 @@ changing anything; most lines exist because something broke.
    or aborted trees, never move snapshot I/O onto the UI thread, and never
    upload history. Retention may delete only matching `snapshot-*.ddhist`
    files inside DiskDeck's Application Support History directory.
+9. **Guided Reclaim never expands authority.** `reclaim_plan` consumes existing
+   `Rec` evidence and returns identifiers and byte counts only. Automatic plans
+   include only `Safe` findings; `Caution` stays unchecked. A scan or cleanup
+   invalidates the plan revision, and pending Trash bytes are never reported as
+   actual freed space.
 
 ## Build & ship
 
@@ -70,6 +75,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 |---|---|---|
 | `scan.rs` | rayon parallel walker; `Arc<Node>` tree; **atomic size bubbling up the ancestor chain so the UI renders the tree WHILE it grows** (the headline feature) | post-scan `compact()` folds dirs <10 MB into parent aggregates; files <100 MB are never materialized as nodes |
 | `rules.rs` | safety KB → `Vec<Rec>`; port of the proven Go doctrine | overlap control: caches with dedicated rules are in the `skip` list so generic `~/Library/Caches` enumeration doesn't double-report; recs carry data-volume paths — fs ops go through `strip_data_root` |
+| `reclaim_plan.rs` | pure Safe-only goal planner and planned-versus-actual outcome model | accepts existing recommendations only; never creates paths, actions, commands, or filesystem work; estimated and pending Trash bytes stay distinct from actual free space |
 | `clean.rs` | trash/delete/empty/command executors + background orchestrator (mpsc events) | **trash = `os::rename` into `~/.Trash` FIRST** — Finder-osascript hangs silently without the Automation TCC grant and is fallback only; `delete_path` chmods-and-retries for write-protected trees (go-modcache style) |
 | `developer.rs` | read-only Developer Lens classifier over existing recommendations | never invent new commands, totals, or eligibility; ordinary cleanup rows stay out and the default summary remains unchanged |
 | `apfs.rs` | fixed-command APFS container and snapshot accounting | never accept UI-supplied command/device input; unavailable purgeable/snapshot bytes stay unavailable and outside reclaimable totals |
@@ -155,7 +161,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 
 ## Repo conventions
 
-- Flat module layout (`scan/rules/clean/history/transfer/offload/moves/developer/apfs/leftovers/monitor/file_review/treemap/theme/app`), one concern per
+- Flat module layout (`scan/rules/reclaim_plan/clean/history/transfer/offload/moves/developer/apfs/leftovers/monitor/file_review/treemap/theme/app`), one concern per
   file. No new crate dependencies without strong reason.
 - The direct `objc2` / `objc2-app-kit` / `objc2-foundation` declarations are
   the narrow exception for the native `NSStatusItem`; eframe already ships the
@@ -168,5 +174,8 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 - The committed v2 roadmap (safety, regrowth, restore, Growth Watch, Developer
   Lens, APFS, app leftovers, menu monitor, and file review) is shipped. Future
   changes still deliver and verify one independent slice at a time.
+- DiskDeck v3 Phase 1 Guided Reclaim is shipped. Storage Forecasting and the
+  Developer Deep Dive remain separate future slices; do not combine their
+  implementation or weaken Phase 1's Safe-only planner to accelerate them.
 - Commit style: imperative subject, body explains the why. `cargo test`
   before every commit.

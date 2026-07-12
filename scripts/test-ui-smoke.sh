@@ -23,7 +23,10 @@ osacompile -o "$TMP/ui-smoke.scpt" "$ROOT/scripts/ui-smoke.applescript"
 /usr/bin/swiftc -typecheck "$ROOT/scripts/right-click.swift"
 sh -n "$ROOT/scripts/test-signed-ui.sh"
 
-if grep -Eiq 'click[^[:cntrl:]]*(Hold to reclaim|Review targets|Move to SSD|Reveal in Finder|Restore to Mac|Hold to restore|Start review scan|button "Watch"|button "Unwatch")' \
+grep -q 'guided-reclaim-visible' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must expose guided-reclaim-visible"
+
+if grep -Eiq 'click[^[:cntrl:]]*(Hold to reclaim|Review targets|Review this plan|Open Trash|Scan again|Move to SSD|Reveal in Finder|Restore to Mac|Hold to restore|Start review scan|button "Watch"|button "Unwatch")' \
     "$ROOT/scripts/ui-smoke.applescript" "$ROOT/scripts/test-signed-ui.sh"
 then
     fail "UI smoke runner must not click a cleanup or storage action"

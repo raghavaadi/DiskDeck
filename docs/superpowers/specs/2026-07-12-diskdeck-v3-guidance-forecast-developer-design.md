@@ -1,6 +1,6 @@
 # DiskDeck v3: Guided Reclaim, Forecasting, and Developer Deep Dive
 
-**Status:** Approved product direction
+**Status:** Phase 1 shipped; Phases 2–3 approved
 
 **Date:** 2026-07-12
 
@@ -31,7 +31,7 @@ scans, or turn UI-provided paths into destructive commands.
 5. **No hidden heavy work.** Full scans remain user initiated. The optional
    menu-bar monitor continues to use low-frequency capacity checks only.
 
-## Phase 1: Guided Reclaim
+## Phase 1: Guided Reclaim — shipped
 
 ### User experience
 

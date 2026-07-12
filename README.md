@@ -18,6 +18,10 @@ compiler proves there are no data races.
   tree through atomics the moment they're statted, and the GPU repaints every
   frame — you watch the disk materialize instead of waiting for a completed
   scan.
+- **Free up a specific amount safely** — choose 10 GB, 20 GB, 50 GB, or a
+  custom goal. DiskDeck builds a deterministic Safe-only plan, explains any
+  shortfall, leaves Caution findings unchecked, and reports actual free space
+  separately from estimates or items still waiting in Trash.
 - **See what grew** — completed scans keep a compact local baseline and show
   the total change plus the largest ≥10 MB growers on the next scan.
 - **Growth Watch** — inspect a 12-scan total-storage timeline, recurring
@@ -164,7 +168,10 @@ point) but are never suggested for deletion.
 | press Esc | close an open actions menu; otherwise return one folder |
 | click rec title | expand explainer |
 | click action chip | toggle → TRASH / ERASE |
-| click Review targets | inspect the reclaim plan before acting |
+| click Free up space | choose a goal and build a Safe-only guided plan |
+| click a goal preset / Use custom goal | recalculate the local plan without touching files |
+| click Review this plan | apply only the proposed Safe checkboxes, then inspect every target |
+| click Safe caches / Needs review | open all reclaim targets for manual review |
 | click Insights | open the bounded local-insights hub |
 | click Moved items in Insights | inspect offloaded items and their restore readiness |
 | click Growth Watch in Insights | inspect retained scan trends and recurring growers |
