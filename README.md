@@ -24,9 +24,13 @@ compiler proves there are no data races.
   separately from estimates or items still waiting in Trash.
 - **See what grew** — completed scans keep a compact local baseline and show
   the total change plus the largest ≥10 MB growers on the next scan.
-- **Growth Watch** — inspect a 12-scan total-storage timeline, recurring
-  growers, and folder watchlist with absolute and percentage change. It reads
-  local snapshots only and never starts an always-on background scan.
+- **Growth Watch and Storage Forecasting** — inspect a 12-scan timeline,
+  recurring growers, and folder watchlist, then see whether storage is steady,
+  improving, volatile, already low, or trending toward the configured
+  low-space threshold. A time range requires at least three compatible scans
+  spanning seven days; confidence advances from Early (3/7) to Developing
+  (5/14) and Reliable (8/30). DiskDeck uses local completed scans only and
+  never starts an always-on background scan.
 - **Developer Lens** — opt into a read-only breakdown of Docker, Xcode and
   simulators, node_modules, package stores, and build tooling. It reuses the
   deterministic reclaim findings, never uploads project names or paths, and
@@ -84,7 +88,10 @@ Safety is structural, not advisory:
   update only when you pin/unpin a measured folder, and measurements advance
   only after a completed scan
 - scan history stays local under DiskDeck's Application Support directory;
-  only the 12 newest compact completed-scan snapshots are retained
+  only the 12 newest compact completed-scan snapshots are retained. New
+  snapshots include local volume capacity for forecasting; older DDHIST1
+  snapshots remain valid for growth comparisons but do not count as forecast
+  evidence
 
 ## Installation
 
@@ -174,7 +181,8 @@ point) but are never suggested for deletion.
 | click Safe caches / Needs review | open all reclaim targets for manual review |
 | click Insights | open the bounded local-insights hub |
 | click Moved items in Insights | inspect offloaded items and their restore readiness |
-| click Growth Watch in Insights | inspect retained scan trends and recurring growers |
+| click Growth Watch in Insights | inspect retained scan trends, recurring growers, and the local storage forecast |
+| click Scan now in Growth Watch | explicitly start a foreground read-only scan when forecast evidence is insufficient |
 | click Developer Lens in Insights | explain measured developer storage by tool family |
 | click APFS accounting in Insights | inspect container capacity and snapshot accounting |
 | click App leftovers in Insights | inspect evidence-backed sandbox leftovers; reveal only |
@@ -219,6 +227,7 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 | `rules.rs` | KB doctrine on a synthetic tree: tiers, Trash=empty-not-trash, ≥50 MB cache floor + skip-list, Library `node_modules` excluded, safe-before-caution ordering, every rec carries explainers, `~` path prettification |
 | `clean.rs` | quick_du, write-protected delete, empty-keeps-dir, output tailing, command timeout |
 | `history.rs` | lossless snapshot/watchlist codecs, corruption handling, compact-tree capture, comparison threshold/order, recurring-growth timeline, atomic retention without touching unrelated files |
+| `forecast.rs` | compatible-capacity filtering, exact 3/7–5/14–8/30 confidence gates, robust median loss rate, uncertainty range, and honest non-estimate states |
 | `developer.rs` | deterministic grouping, stable ordering, totals, Caution counts, and exclusion of ordinary cleanup rows |
 | `apfs.rs` | fixed-command APFS plist parsing, bounded values, snapshot count, and timeout/failure behavior |
 | `leftovers.rs` | bundle-ID policy, ≥250 MB floor, exact installed-app absence proof, conservative omission |

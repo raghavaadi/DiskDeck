@@ -42,6 +42,12 @@ changing anything; most lines exist because something broke.
    include only `Safe` findings; `Caution` stays unchecked. A scan or cleanup
    invalidates the plan revision, and pending Trash bytes are never reported as
    actual freed space.
+10. **Forecasting uses foreground evidence only.** New snapshots are written as
+   backward-compatible `DDHIST2` records with volume capacity; `DDHIST1`
+   remains readable for growth history but cannot invent missing capacity.
+   `forecast::analyze` must reject invalid, duplicate, and incompatible-volume
+   observations. The menu item's five-minute loop may use `statfs` only: never
+   read history, traverse the disk, or start a scan from that loop.
 
 ## Build & ship
 
@@ -82,7 +88,8 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 | `leftovers.rs` | read-only large sandbox absence proof | exact bundle-ID-shaped `Library/Containers` entries only; lookup failure means omit; findings stay Caution/reveal-only |
 | `monitor.rs` | opt-in native menu-bar free-space readout and user login setting | defaults off; five-minute `statfs` updates only; login LaunchAgent is a separate explicit choice; never start a scan/helper |
 | `file_review.rs` | opt-in duplicate and large-old user-file review | never auto-start; standard user roots only; byte-compare before calling duplicates exact; hardlinks dedup; reveal/Quick Look only |
-| `history.rs` | compact completed-scan snapshots, previous-scan comparison, Growth Watch timeline/watchlist, atomic retention worker | raw path bytes must round-trip; corrupt snapshots are skipped; corrupt watchlists are never overwritten; no always-on scan is started |
+| `history.rs` | compact completed-scan snapshots, backward-compatible capacity evidence, previous-scan comparison, Growth Watch timeline/watchlist, atomic retention worker | write DDHIST2 and read DDHIST1/DDHIST2; raw path bytes must round-trip; corrupt snapshots are skipped; corrupt watchlists are never overwritten; no always-on scan is started |
+| `forecast.rs` | pure compatible-capacity filter and robust local time-to-low model | require 3 scans/7 days before estimating; flat, improving, volatile, invalid, sparse, and incompatible evidence must not become false precision |
 | `transfer.rs` | shared path-identity, collision, apparent-size, and verified-ditto primitives | copy helpers never remove either side; callers own the final identity recheck and deletion order |
 | `offload.rs` | protected-path policy, external-volume checks, verified copy/move, ledger, worker events | UI eligibility is advisory; the worker must repeat full policy/target/capacity checks, and only a matching source identity may reach `delete_path` |
 | `moves.rs` | lossless local move registry, drive reconciliation, restore preflight and worker | restore is copy → verify → atomic install → target identity recheck → external delete; any occupied or changed path blocks before mutation |
@@ -161,7 +168,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 
 ## Repo conventions
 
-- Flat module layout (`scan/rules/reclaim_plan/clean/history/transfer/offload/moves/developer/apfs/leftovers/monitor/file_review/treemap/theme/app`), one concern per
+- Flat module layout (`scan/rules/reclaim_plan/clean/history/forecast/transfer/offload/moves/developer/apfs/leftovers/monitor/file_review/treemap/theme/app`), one concern per
   file. No new crate dependencies without strong reason.
 - The direct `objc2` / `objc2-app-kit` / `objc2-foundation` declarations are
   the narrow exception for the native `NSStatusItem`; eframe already ships the
@@ -174,8 +181,8 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 - The committed v2 roadmap (safety, regrowth, restore, Growth Watch, Developer
   Lens, APFS, app leftovers, menu monitor, and file review) is shipped. Future
   changes still deliver and verify one independent slice at a time.
-- DiskDeck v3 Phase 1 Guided Reclaim is shipped. Storage Forecasting and the
-  Developer Deep Dive remain separate future slices; do not combine their
-  implementation or weaken Phase 1's Safe-only planner to accelerate them.
+- DiskDeck v3 Phases 1–2 (Guided Reclaim and Storage Forecasting) are shipped.
+  Developer Deep Dive remains a separate future slice; do not weaken the
+  Safe-only planner or forecast evidence gates to accelerate it.
 - Commit style: imperative subject, body explains the why. `cargo test`
   before every commit.

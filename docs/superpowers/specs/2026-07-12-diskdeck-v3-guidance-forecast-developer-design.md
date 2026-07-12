@@ -1,6 +1,6 @@
 # DiskDeck v3: Guided Reclaim, Forecasting, and Developer Deep Dive
 
-**Status:** Phase 1 shipped; Phases 2–3 approved
+**Status:** Phases 1–2 shipped; Phase 3 approved
 
 **Date:** 2026-07-12
 
@@ -103,7 +103,7 @@ command recommendations execute only the vetted command string stored in
   and tier enforcement; signed-app smoke testing covers the complete flow
   without cleaning owner data.
 
-## Phase 2: Storage Forecasting
+## Phase 2: Storage Forecasting — shipped
 
 ### User experience
 
@@ -122,8 +122,8 @@ The view separates:
 Confidence uses words rather than false precision:
 
 - **Early estimate:** at least three compatible scans spanning seven days;
-- **Developing pattern:** at least five scans spanning fourteen days;
-- **Reliable trend:** at least eight scans spanning thirty days.
+- **Developing estimate:** at least five scans spanning fourteen days;
+- **Reliable estimate:** at least eight scans spanning thirty days.
 
 The headline uses a range such as “about 5–7 weeks” rather than a precise date.
 If recent behavior is flat, volatile, or improving, DiskDeck says that instead
@@ -160,6 +160,9 @@ is produced only when DiskDeck records a completed foreground scan.
 - No background full scan is introduced.
 - Tests cover confidence thresholds, median-rate behavior, cleanup spikes,
   volatility, incompatible history, and non-growing disks.
+- The signed application exposes both forecast surfaces through accessibility
+  and keeps them readable and non-overlapping at minimum and typical window
+  sizes in light and dark appearances.
 
 ## Phase 3: Developer Deep Dive
 
