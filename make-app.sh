@@ -45,6 +45,17 @@ if [ "$DISTRIBUTION" = "1" ]; then
   }
 fi
 
+REQUIRED_TARGETS='aarch64-apple-darwin x86_64-apple-darwin'
+INSTALLED_TARGETS="$(rustup target list --installed)"
+for TARGET in $REQUIRED_TARGETS; do
+  printf '%s\n' "$INSTALLED_TARGETS" | grep -Fxq "$TARGET" || {
+    echo "✗ Install universal Rust targets once:" >&2
+    echo "  rustup target add aarch64-apple-darwin x86_64-apple-darwin" >&2
+    exit 1
+  }
+done
+export MACOSX_DEPLOYMENT_TARGET=12.0
+
 # Assemble and codesign the bundle on an internal APFS volume, never inside the
 # repo. If the checkout lives on an exFAT disk (e.g. an external SSD), macOS
 # scatters AppleDouble `._*` files through the bundle and `codesign --deep`
@@ -53,7 +64,9 @@ BUILD="$(mktemp -d "${TMPDIR:-/tmp}/diskdeck.XXXXXX")"
 trap 'rm -rf "$BUILD"' EXIT
 APP="$BUILD/DiskDeck.app"
 
-cargo build --release
+for TARGET in $REQUIRED_TARGETS; do
+  cargo build --release --locked --target "$TARGET"
+done
 
 # ── icns from assets/icon.png ──
 if [ ! -f assets/DiskDeck.icns ] || [ assets/icon.png -nt assets/DiskDeck.icns ]; then
@@ -68,7 +81,11 @@ fi
 # ── bundle ──
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp target/release/diskdeck "$APP/Contents/MacOS/diskdeck"
+lipo -create \
+  target/aarch64-apple-darwin/release/diskdeck \
+  target/x86_64-apple-darwin/release/diskdeck \
+  -output "$APP/Contents/MacOS/diskdeck"
+scripts/check-universal-binary.sh "$APP/Contents/MacOS/diskdeck"
 cp assets/DiskDeck.icns "$APP/Contents/Resources/DiskDeck.icns"
 
 # macOS 26 adaptive icon: compile the Icon Composer document into Assets.car
