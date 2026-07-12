@@ -180,6 +180,7 @@ enum RailView {
     GuidedReclaim,
     Reclaim,
     Insights,
+    Guide,
     Moved,
     Growth,
     Developer,
@@ -195,7 +196,8 @@ fn rail_back_target(view: RailView) -> Option<RailView> {
     match view {
         RailView::Summary => None,
         RailView::GuidedReclaim | RailView::Reclaim | RailView::Insights => Some(RailView::Summary),
-        RailView::Moved
+        RailView::Guide
+        | RailView::Moved
         | RailView::Growth
         | RailView::Developer
         | RailView::Apfs
@@ -2143,6 +2145,12 @@ struct GuidedLayout {
     action: Rect,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GuidePrimaryAction {
+    enabled: bool,
+    label: &'static str,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ReviewRowColumns {
     text_width: f32,
@@ -2282,6 +2290,25 @@ fn can_apply_guided_plan(
     plan: &crate::reclaim_plan::ReclaimPlan,
 ) -> bool {
     acknowledged && draft_revision == Some(recs_revision) && !scanning && !plan.items.is_empty()
+}
+
+fn guide_primary_action(recs_ready: bool, scanning: bool) -> GuidePrimaryAction {
+    if scanning {
+        GuidePrimaryAction {
+            enabled: false,
+            label: "Scanning for safe targets…",
+        }
+    } else if !recs_ready {
+        GuidePrimaryAction {
+            enabled: false,
+            label: "No safe targets yet",
+        }
+    } else {
+        GuidePrimaryAction {
+            enabled: true,
+            label: "Free up space",
+        }
+    }
 }
 
 fn apply_guided_plan(rows: &mut [RecRow], plan: &crate::reclaim_plan::ReclaimPlan) {
@@ -2921,6 +2948,11 @@ mod tests {
     }
 
     #[test]
+    fn guide_returns_to_insights_without_mutation_routing() {
+        assert_eq!(rail_back_target(RailView::Guide), Some(RailView::Insights));
+    }
+
+    #[test]
     fn rail_back_returns_each_detail_view_to_summary() {
         assert_eq!(rail_back_target(RailView::Summary), None);
         assert_eq!(
@@ -2958,6 +2990,31 @@ mod tests {
         assert_eq!(
             rail_back_target(RailView::External),
             Some(RailView::Insights)
+        );
+    }
+
+    #[test]
+    fn guide_primary_action_is_honest_about_readiness() {
+        assert_eq!(
+            guide_primary_action(false, true),
+            GuidePrimaryAction {
+                enabled: false,
+                label: "Scanning for safe targets…",
+            }
+        );
+        assert_eq!(
+            guide_primary_action(false, false),
+            GuidePrimaryAction {
+                enabled: false,
+                label: "No safe targets yet",
+            }
+        );
+        assert_eq!(
+            guide_primary_action(true, false),
+            GuidePrimaryAction {
+                enabled: true,
+                label: "Free up space",
+            }
         );
     }
 
@@ -4389,6 +4446,10 @@ impl App {
                 self.draw_insights(ui, rect);
                 return;
             }
+            RailView::Guide => {
+                self.draw_safety_guide(ui, rect);
+                return;
+            }
             RailView::Moved => {
                 self.draw_moved_items(ui, rect);
                 return;
@@ -5131,6 +5192,21 @@ impl App {
         } else if go_back {
             self.rail_view = RailView::Summary;
         }
+    }
+
+    fn draw_safety_guide(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let content = panel_chrome(
+            ui,
+            rect,
+            "Safety & Quick Start",
+            Some(("read-only guide".into(), palette.faint)),
+        );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content), |ui| {
+            if ui.button("← Insights").clicked() {
+                self.rail_view = RailView::Insights;
+            }
+        });
     }
 
     fn draw_insights(&mut self, ui: &mut egui::Ui, rect: Rect) {
