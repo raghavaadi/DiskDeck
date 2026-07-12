@@ -2,8 +2,11 @@
 
 use crate::rules::{Rec, Tier};
 use crate::scan::Node;
+use std::io::Read;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DeveloperSection {
@@ -511,6 +514,224 @@ where
     assemble_report(candidates, docker)
 }
 
+const DOCKER_ARGS: [&str; 4] = [
+    "system",
+    "df",
+    "--format",
+    "{{.Type}}\t{{.Size}}\t{{.Reclaimable}}",
+];
+
+fn docker_command_args() -> &'static [&'static str] {
+    &DOCKER_ARGS
+}
+
+fn parse_docker_size(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let unit_start = value.find(|character: char| character.is_ascii_alphabetic())?;
+    let number: f64 = value[..unit_start].trim().parse().ok()?;
+    if !number.is_finite() || number < 0.0 {
+        return None;
+    }
+    let factor = match &value[unit_start..] {
+        "B" => 1_f64,
+        "kB" | "KB" => 1_000_f64,
+        "MB" => 1_000_000_f64,
+        "GB" => 1_000_000_000_f64,
+        "TB" => 1_000_000_000_000_f64,
+        "KiB" => 1_024_f64,
+        "MiB" => 1_048_576_f64,
+        "GiB" => 1_073_741_824_f64,
+        "TiB" => 1_099_511_627_776_f64,
+        _ => return None,
+    };
+    let bytes = number * factor;
+    if !bytes.is_finite() || bytes > i64::MAX as f64 {
+        None
+    } else {
+        Some(bytes.round() as i64)
+    }
+}
+
+fn parse_docker_df(output: &str) -> Vec<DockerDetail> {
+    let mut details: Vec<(usize, DockerDetail)> = output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.trim().splitn(3, '\t');
+            let category = fields.next()?.trim();
+            let bytes = parse_docker_size(fields.next()?.trim())?;
+            let reclaimable = fields.next()?.split_whitespace().next()?;
+            let reclaimable_bytes = parse_docker_size(reclaimable)?;
+            if bytes <= 0 && reclaimable_bytes <= 0 {
+                return None;
+            }
+            let (order, title, rebuild_cost) = match category {
+                "Images" => (0, "Images", RebuildCost::LargeDownload),
+                "Containers" => (1, "Containers", RebuildCost::ManualSetup),
+                "Local Volumes" => (2, "Local volumes", RebuildCost::ManualSetup),
+                "Build Cache" => (3, "Build cache", RebuildCost::QuickRegeneration),
+                _ => return None,
+            };
+            Some((
+                order,
+                DockerDetail {
+                    title: title.into(),
+                    bytes,
+                    reclaimable_bytes,
+                    rebuild_cost,
+                    counted: false,
+                    explanation: "Inside Docker; not added to the measured filesystem footprint."
+                        .into(),
+                },
+            ))
+        })
+        .collect();
+    details.sort_by_key(|(order, _)| *order);
+    details.into_iter().map(|(_, detail)| detail).collect()
+}
+
+fn load_docker_with<F>(run: F) -> DockerBreakdown
+where
+    F: FnOnce() -> Result<Vec<u8>, String>,
+{
+    let bytes = match run() {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return DockerBreakdown {
+                details: Vec::new(),
+                unavailable: Some(format!("Docker breakdown unavailable: {error}")),
+            }
+        }
+    };
+    let output = match String::from_utf8(bytes) {
+        Ok(output) => output,
+        Err(_) => {
+            return DockerBreakdown {
+                details: Vec::new(),
+                unavailable: Some("Docker returned non-UTF-8 output.".into()),
+            }
+        }
+    };
+    let details = parse_docker_df(&output);
+    DockerBreakdown {
+        unavailable: details
+            .is_empty()
+            .then(|| "Docker reported no measurable storage categories.".into()),
+        details,
+    }
+}
+
+pub fn load_docker_breakdown() -> DockerBreakdown {
+    load_docker_with(run_fixed_docker)
+}
+
+const DOCKER_OUTPUT_CAP: usize = 64 * 1024;
+
+fn docker_binary() -> Option<PathBuf> {
+    let from_path = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|directory| directory.join("docker"))
+            .find(|path| path.is_file())
+    });
+    from_path.or_else(|| {
+        [
+            "/usr/local/bin/docker",
+            "/opt/homebrew/bin/docker",
+            "/Applications/Docker.app/Contents/Resources/bin/docker",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+    })
+}
+
+fn capped_reader<R>(reader: R) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        reader
+            .take((DOCKER_OUTPUT_CAP + 1) as u64)
+            .read_to_end(&mut output)?;
+        Ok(output)
+    })
+}
+
+fn join_output(
+    reader: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    stream: &str,
+) -> Result<Vec<u8>, String> {
+    let output = reader
+        .join()
+        .map_err(|_| format!("Docker {stream} reader stopped"))?
+        .map_err(|error| format!("read Docker {stream}: {error}"))?;
+    if output.len() > DOCKER_OUTPUT_CAP {
+        Err(format!("Docker {stream} exceeded 64 KiB"))
+    } else {
+        Ok(output)
+    }
+}
+
+fn run_fixed_docker() -> Result<Vec<u8>, String> {
+    let binary = docker_binary().ok_or("docker executable was not found")?;
+    let mut child = Command::new(binary)
+        .args(docker_command_args())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("start docker system df: {error}"))?;
+    let Some(stdout_pipe) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("Docker stdout was unavailable".into());
+    };
+    let Some(stderr_pipe) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("Docker stderr was unavailable".into());
+    };
+    let stdout = capped_reader(stdout_pipe);
+    let stderr = capped_reader(stderr_pipe);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = join_output(stdout, "stdout");
+                let _ = join_output(stderr, "stderr");
+                return Err("timed out after 3 seconds".into());
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = join_output(stdout, "stdout");
+                let _ = join_output(stderr, "stderr");
+                return Err(format!("wait for docker system df: {error}"));
+            }
+        }
+    };
+    let stdout_result = join_output(stdout, "stdout");
+    let stderr_result = join_output(stderr, "stderr");
+    let stdout = stdout_result?;
+    let stderr = stderr_result?;
+    if !status.success() {
+        let message = String::from_utf8_lossy(&stderr);
+        let message = message.trim();
+        return Err(if message.is_empty() {
+            format!("docker system df exited with {status}")
+        } else {
+            format!("docker system df failed: {message}")
+        });
+    }
+    Ok(stdout)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeveloperKind {
     Containers,
@@ -865,6 +1086,85 @@ mod tests {
             devices.evidence.command,
             Some("xcrun simctl delete unavailable")
         );
+    }
+
+    #[test]
+    fn docker_sizes_are_parsed_conservatively() {
+        assert_eq!(parse_docker_size("0B"), Some(0));
+        assert_eq!(parse_docker_size("3.4kB"), Some(3_400));
+        assert_eq!(parse_docker_size("12.5MB"), Some(12_500_000));
+        assert_eq!(parse_docker_size("1.2GB"), Some(1_200_000_000));
+        assert_eq!(parse_docker_size("1.5GiB"), Some(1_610_612_736));
+        assert_eq!(parse_docker_size("-4MB"), None);
+        assert_eq!(parse_docker_size("NaNGB"), None);
+        assert_eq!(parse_docker_size("999XB"), None);
+    }
+
+    #[test]
+    fn docker_parser_maps_known_rows_and_omits_malformed_values() {
+        let rows = parse_docker_df(
+            "Images\t1.2GB\t800MB (66%)\n\
+             Containers\t300MB\t20MB (6%)\n\
+             Local Volumes\t2GB\t1GB (50%)\n\
+             Build Cache\t700MB\t600MB\n\
+             Unknown\t9GB\t8GB\n\
+             Images\tbad\t2GB\n\
+             Containers\t0B\t0B\n",
+        );
+        let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["Images", "Containers", "Local volumes", "Build cache"]
+        );
+        assert_eq!(rows[0].bytes, 1_200_000_000);
+        assert_eq!(rows[0].reclaimable_bytes, 800_000_000);
+        assert_eq!(rows[0].rebuild_cost, RebuildCost::LargeDownload);
+        assert_eq!(rows[1].rebuild_cost, RebuildCost::ManualSetup);
+        assert_eq!(rows[2].rebuild_cost, RebuildCost::ManualSetup);
+        assert_eq!(rows[3].rebuild_cost, RebuildCost::QuickRegeneration);
+        assert!(rows.iter().all(|row| !row.counted));
+        assert!(rows.iter().all(|row| row.explanation.contains("not added")));
+    }
+
+    #[test]
+    fn docker_loader_surfaces_failure_timeout_and_non_utf8() {
+        let failed = load_docker_with(|| Err("engine unavailable".into()));
+        assert!(failed.details.is_empty());
+        assert!(failed
+            .unavailable
+            .as_deref()
+            .unwrap()
+            .contains("engine unavailable"));
+
+        let timed_out = load_docker_with(|| Err("timed out after 3 seconds".into()));
+        assert!(timed_out
+            .unavailable
+            .as_deref()
+            .unwrap()
+            .contains("timed out"));
+
+        let non_utf8 = load_docker_with(|| Ok(vec![0xff, 0xfe]));
+        assert!(non_utf8
+            .unavailable
+            .as_deref()
+            .unwrap()
+            .contains("non-UTF-8"));
+    }
+
+    #[test]
+    fn docker_command_spec_is_fixed_and_read_only() {
+        assert_eq!(
+            docker_command_args(),
+            [
+                "system",
+                "df",
+                "--format",
+                "{{.Type}}\t{{.Size}}\t{{.Reclaimable}}",
+            ]
+        );
+        assert!(!docker_command_args()
+            .iter()
+            .any(|arg| matches!(*arg, "prune" | "rm" | "delete")));
     }
 
     #[test]
