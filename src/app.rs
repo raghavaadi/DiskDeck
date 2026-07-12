@@ -33,7 +33,7 @@ use crate::reclaim_plan::{
 };
 use crate::rules::{self, strip_data_root, Action, Rec, Tier};
 use crate::scan::{disk_stats, start_scan, DiskStats, Node, ScanHandle, ScanState, DATA_ROOT};
-use crate::search::SearchSummary;
+use crate::search::{crumbs_for, search_tree, SearchSummary, DEFAULT_RESULT_LIMIT};
 use crate::theme;
 use crate::treemap;
 use egui::{
@@ -241,7 +241,36 @@ enum SearchAction {
 }
 
 impl SearchAction {
+    #[cfg(test)]
     const ALL: [Self; 3] = [Self::OpenMap, Self::QuickLook, Self::Reveal];
+}
+
+fn primary_search_action(node: &Node) -> Option<SearchAction> {
+    if node.denied.load(Relaxed) {
+        None
+    } else if node.is_dir {
+        Some(SearchAction::OpenMap)
+    } else {
+        Some(SearchAction::QuickLook)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SearchRowLayout {
+    content: Rect,
+    actions: Rect,
+}
+
+impl SearchRowLayout {
+    fn from_rect(row: Rect) -> Self {
+        let action_width = 174.0_f32.min(row.width());
+        let actions = Rect::from_min_max(pos2(row.max.x - action_width, row.min.y), row.max);
+        let content = Rect::from_min_max(
+            row.min,
+            pos2((actions.min.x - 10.0).max(row.min.x), row.max.y),
+        );
+        Self { content, actions }
+    }
 }
 
 fn can_open_storage_search(state: Option<ScanState>, confirmation_open: bool) -> bool {
@@ -772,9 +801,40 @@ impl App {
     }
 
     fn open_storage_search(&mut self) {
+        if let Some(dialog) = self.search_dialog.as_mut() {
+            dialog.request_focus = true;
+            return;
+        }
         let state = self.scan.as_ref().map(ScanHandle::state);
         if can_open_storage_search(state, self.confirmation_dialog_open()) {
             self.search_dialog = Some(SearchDialog::new(self.recs_revision));
+        }
+    }
+
+    fn open_search_folder(&mut self, root: &Arc<Node>, node: Arc<Node>) -> bool {
+        if !node.is_dir || node.denied.load(Relaxed) {
+            return false;
+        }
+        let Some(crumbs) = crumbs_for(root, &node) else {
+            return false;
+        };
+        self.crumbs = crumbs;
+        self.view = Some(node);
+        self.zoom = None;
+        invalidate_storage_search(&mut self.search_dialog);
+        true
+    }
+
+    fn launch_quick_look(&mut self, path: &Path) {
+        if let Err(error) = std::process::Command::new("/usr/bin/qlmanage")
+            .arg("-p")
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            self.ops(OpsKind::Amber, format!("Quick Look unavailable — {error}"));
         }
     }
 
@@ -2022,6 +2082,43 @@ impl WorkspaceLayout {
 mod tests {
     use super::*;
 
+    fn storage_search_root() -> Arc<Node> {
+        Arc::new(Node {
+            name: "Data".into(),
+            path: "/System/Volumes/Data".into(),
+            is_dir: true,
+            bytes: std::sync::atomic::AtomicI64::new(20_000_000),
+            files: std::sync::atomic::AtomicI64::new(2),
+            small_bytes: std::sync::atomic::AtomicI64::new(0),
+            small_count: std::sync::atomic::AtomicI64::new(0),
+            denied: std::sync::atomic::AtomicBool::new(false),
+            parent: std::sync::Weak::new(),
+            children: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn storage_search_child(
+        parent: &Arc<Node>,
+        name: &str,
+        is_dir: bool,
+        denied: bool,
+    ) -> Arc<Node> {
+        let child = Arc::new(Node {
+            name: name.into(),
+            path: parent.path.join(name),
+            is_dir,
+            bytes: std::sync::atomic::AtomicI64::new(10_000_000),
+            files: std::sync::atomic::AtomicI64::new(1),
+            small_bytes: std::sync::atomic::AtomicI64::new(0),
+            small_count: std::sync::atomic::AtomicI64::new(0),
+            denied: std::sync::atomic::AtomicBool::new(denied),
+            parent: Arc::downgrade(parent),
+            children: std::sync::Mutex::new(Vec::new()),
+        });
+        parent.children.lock().unwrap().push(child.clone());
+        child
+    }
+
     #[test]
     fn storage_search_opens_only_for_an_idle_completed_map() {
         assert!(can_open_storage_search(Some(ScanState::Done), false));
@@ -2075,6 +2172,48 @@ mod tests {
             ],
             SearchAction::ALL
         );
+    }
+
+    #[test]
+    fn storage_search_rows_keep_content_clear_of_actions() {
+        for width in [620.0, 760.0] {
+            let row = Rect::from_min_size(Pos2::ZERO, vec2(width, 62.0));
+            let layout = SearchRowLayout::from_rect(row);
+            assert!(row.contains_rect(layout.content));
+            assert!(row.contains_rect(layout.actions));
+            assert!(layout.content.max.x <= layout.actions.min.x);
+            assert!(layout.actions.width() >= 168.0);
+        }
+    }
+
+    #[test]
+    fn storage_search_primary_actions_never_mutate() {
+        let root = storage_search_root();
+        let folder = storage_search_child(&root, "Projects", true, false);
+        let file = storage_search_child(&root, "archive.dmg", false, false);
+        let denied = storage_search_child(&root, "Private", true, true);
+        assert_eq!(primary_search_action(&folder), Some(SearchAction::OpenMap));
+        assert_eq!(primary_search_action(&file), Some(SearchAction::QuickLook));
+        assert_eq!(primary_search_action(&denied), None);
+    }
+
+    #[test]
+    fn storage_search_open_map_rebuilds_the_exact_breadcrumb_chain() {
+        let root = storage_search_root();
+        let users = storage_search_child(&root, "Users", true, false);
+        let project = storage_search_child(&users, "WardenUI", true, false);
+        let mut app = App::new();
+        assert!(app.open_search_folder(&root, project.clone()));
+        assert_eq!(
+            app.crumbs
+                .iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Users", "WardenUI"]
+        );
+        assert!(Arc::ptr_eq(app.view.as_ref().unwrap(), &project));
+        assert!(app.zoom.is_none());
+        assert!(app.search_dialog.is_none());
     }
 
     fn fixture_rec_row(id: &str, tier: Tier, checked: bool) -> RecRow {
@@ -2888,6 +3027,7 @@ impl eframe::App for App {
             self.ops_panel(ctx);
         }
         self.central(ctx);
+        self.draw_storage_search(ctx);
         self.offload_dialog(ctx);
         self.restore_dialog(ctx);
         self.trash_restore_dialog(ctx);
@@ -3274,6 +3414,10 @@ impl App {
             content.max - vec2(12.0, 10.0),
         );
         let mut go_to: Option<usize> = None; // truncate crumbs to this depth
+        let mut open_search = false;
+        let search_state = self.scan.as_ref().map(ScanHandle::state);
+        let search_ready = can_open_storage_search(search_state, self.confirmation_dialog_open());
+        let search_open = self.search_dialog.is_some();
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(crumb_rect), |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 5.0;
@@ -3338,9 +3482,36 @@ impl App {
                     {
                         go_to = back_target(depth);
                     }
+                    ui.add_space(3.0);
+                    let find = ui.add_enabled(
+                        search_ready && !search_open,
+                        egui::Button::new(RichText::new("Find  ⌘F").font(theme::body(11.0)).color(
+                            if search_ready {
+                                palette.accent
+                            } else {
+                                palette.faint
+                            },
+                        ))
+                        .fill(palette.surface_raised)
+                        .stroke(Stroke::new(1.0, palette.edge_soft))
+                        .rounding(Rounding::same(6.0)),
+                    );
+                    let find = if search_ready {
+                        find.on_hover_text("Search this completed storage map")
+                    } else if search_state.is_some() {
+                        find.on_disabled_hover_text("Available when this map completes")
+                    } else {
+                        find.on_disabled_hover_text("Run a scan to search mapped storage")
+                    };
+                    if find.clicked() {
+                        open_search = true;
+                    }
                 });
             });
         });
+        if open_search {
+            self.open_storage_search();
+        }
         if let Some(d) = go_to {
             self.crumbs.truncate(d);
             self.view = self.crumbs.last().cloned();
@@ -6368,6 +6539,282 @@ impl App {
             }
         } else {
             self.hold = 0.0;
+        }
+    }
+
+    fn draw_storage_search(&mut self, ctx: &Context) {
+        let Some(mut dialog) = self.search_dialog.take() else {
+            return;
+        };
+        let Some(root) = self.scan.as_ref().and_then(|scan| {
+            (scan.state() == ScanState::Done && dialog.scan_revision == self.recs_revision)
+                .then(|| scan.root.clone())
+        }) else {
+            return;
+        };
+
+        let palette = theme::palette(ctx);
+        let mut window_open = true;
+        let mut close_requested = false;
+        let mut requested: Option<(SearchAction, Arc<Node>)> = None;
+
+        egui::Window::new(RichText::new("Storage Search").font(theme::body(13.0)))
+            .id(egui::Id::new("storage-search-window"))
+            .open(&mut window_open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_width(700.0);
+                ui.label(
+                    RichText::new(
+                        "Searches folders and large files retained in this completed map. Small items remain grouped.",
+                    )
+                    .font(theme::body(10.0))
+                    .color(palette.muted),
+                );
+                ui.add_space(7.0);
+                let edit = ui.add_sized(
+                    vec2(ui.available_width(), 32.0),
+                    egui::TextEdit::singleline(&mut dialog.query)
+                        .id_source("storage-search-field")
+                        .hint_text("Find a folder, project, or large file")
+                        .font(theme::body(12.0)),
+                );
+                if dialog.request_focus {
+                    edit.request_focus();
+                    dialog.request_focus = false;
+                }
+                if edit.changed() {
+                    dialog.summary = search_tree(&root, &dialog.query, DEFAULT_RESULT_LIMIT);
+                    dialog.selected = 0;
+                }
+
+                let query_len = dialog.query.trim().chars().count();
+                ui.add_space(5.0);
+                if query_len < 2 {
+                    ui.label(
+                        RichText::new("Type at least 2 characters to search this map.")
+                            .font(theme::body(9.5))
+                            .color(palette.faint),
+                    );
+                } else if dialog.summary.total_matches == 0 {
+                    ui.label(
+                        RichText::new("No mapped folder or large file matches this search.")
+                            .font(theme::body(9.5))
+                            .color(palette.caution),
+                    );
+                } else {
+                    let count = if dialog.summary.total_matches > dialog.summary.results.len() {
+                        format!(
+                            "Showing {} of {} matches",
+                            dialog.summary.results.len(),
+                            dialog.summary.total_matches
+                        )
+                    } else {
+                        format!("{} matches", dialog.summary.total_matches)
+                    };
+                    ui.label(
+                        RichText::new(count)
+                            .font(theme::mono(9.5))
+                            .color(palette.accent),
+                    );
+                }
+                ui.add_space(5.0);
+
+                if !dialog.summary.results.is_empty() {
+                    if ui.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                    }) {
+                        dialog.selected = (dialog.selected + 1)
+                            .min(dialog.summary.results.len().saturating_sub(1));
+                    }
+                    if ui.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                    }) {
+                        dialog.selected = dialog.selected.saturating_sub(1);
+                    }
+                    if ui.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                    }) {
+                        let result = &dialog.summary.results[dialog.selected];
+                        if let Some(action) = primary_search_action(&result.node) {
+                            requested = Some((action, result.node.clone()));
+                        }
+                    }
+                }
+
+                let results = dialog.summary.results.clone();
+                egui::ScrollArea::vertical()
+                    .id_salt("storage-search-results")
+                    .max_height(355.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for (index, result) in results.iter().enumerate() {
+                            let selected = index == dialog.selected;
+                            let (row, response) = ui.allocate_exact_size(
+                                vec2(ui.available_width(), 62.0),
+                                Sense::click(),
+                            );
+                            response.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::SelectableLabel,
+                                    true,
+                                    selected,
+                                    format!(
+                                        "{} · {} · {}",
+                                        result.node.name,
+                                        if result.node.is_dir {
+                                            "folder"
+                                        } else {
+                                            "large file"
+                                        },
+                                        fmt_bytes(result.node.bytes())
+                                    ),
+                                )
+                            });
+                            if response.clicked() {
+                                dialog.selected = index;
+                            }
+                            if response.double_clicked() {
+                                if let Some(action) = primary_search_action(&result.node) {
+                                    requested = Some((action, result.node.clone()));
+                                }
+                            }
+
+                            ui.painter().rect_filled(
+                                row,
+                                Rounding::same(8.0),
+                                if selected {
+                                    palette.accent_dim(20)
+                                } else {
+                                    palette.surface_raised
+                                },
+                            );
+                            ui.painter().rect_stroke(
+                                row,
+                                Rounding::same(8.0),
+                                Stroke::new(
+                                    1.0,
+                                    if selected {
+                                        palette.accent_dim(120)
+                                    } else {
+                                        palette.edge_soft
+                                    },
+                                ),
+                            );
+                            let layout = SearchRowLayout::from_rect(row.shrink2(vec2(9.0, 5.0)));
+                            ui.allocate_new_ui(
+                                egui::UiBuilder::new().max_rect(layout.content),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(tail_str(&result.node.name, 48))
+                                            .font(theme::display_md(10.5))
+                                            .color(palette.ink),
+                                    );
+                                    ui.label(
+                                        RichText::new(tail_str(&result.display_path, 78))
+                                            .font(theme::mono(8.5))
+                                            .color(palette.muted),
+                                    );
+                                    let kind = if result.node.denied.load(Relaxed) {
+                                        "No access"
+                                    } else if result.node.is_dir {
+                                        "Folder"
+                                    } else {
+                                        "Large file"
+                                    };
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} · {}",
+                                            kind,
+                                            fmt_bytes(result.node.bytes())
+                                        ))
+                                        .font(theme::body(8.5))
+                                        .color(if result.node.denied.load(Relaxed) {
+                                            palette.caution
+                                        } else {
+                                            palette.faint
+                                        }),
+                                    );
+                                },
+                            );
+                            ui.allocate_new_ui(
+                                egui::UiBuilder::new().max_rect(layout.actions),
+                                |ui| {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let denied = result.node.denied.load(Relaxed);
+                                            let can_open = result.node.is_dir
+                                                && !denied
+                                                && crumbs_for(&root, &result.node).is_some();
+                                            if result.node.is_dir {
+                                                if ui
+                                                    .add_enabled(can_open, egui::Button::new("Open map"))
+                                                    .clicked()
+                                                {
+                                                    requested = Some((
+                                                        SearchAction::OpenMap,
+                                                        result.node.clone(),
+                                                    ));
+                                                }
+                                            } else if ui
+                                                .add_enabled(!denied, egui::Button::new("Quick Look"))
+                                                .clicked()
+                                            {
+                                                requested = Some((
+                                                    SearchAction::QuickLook,
+                                                    result.node.clone(),
+                                                ));
+                                            }
+                                            if ui.small_button("Reveal").clicked() {
+                                                requested = Some((
+                                                    SearchAction::Reveal,
+                                                    result.node.clone(),
+                                                ));
+                                            }
+                                        },
+                                    );
+                                },
+                            );
+                            ui.add_space(6.0);
+                        }
+                    });
+
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("↑↓ Select · Return Open · Esc Close")
+                            .font(theme::mono(8.5))
+                            .color(palette.faint),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Done").clicked() {
+                            close_requested = true;
+                        }
+                    });
+                });
+            });
+
+        if !window_open || close_requested {
+            return;
+        }
+        match requested {
+            Some((SearchAction::OpenMap, node)) => {
+                if !self.open_search_folder(&root, node) {
+                    self.search_dialog = Some(dialog);
+                }
+            }
+            Some((SearchAction::QuickLook, node)) => {
+                self.launch_quick_look(&node.path);
+                self.search_dialog = Some(dialog);
+            }
+            Some((SearchAction::Reveal, node)) => {
+                reveal_in_finder(&node.path);
+                self.search_dialog = Some(dialog);
+            }
+            None => self.search_dialog = Some(dialog),
         }
     }
 
