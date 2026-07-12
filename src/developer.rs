@@ -124,13 +124,22 @@ pub struct DeveloperReport {
     pub docker: DockerBreakdown,
 }
 
-fn deep_section(id: &str) -> Option<DeveloperSection> {
+fn deep_section(rec: &Rec) -> Option<DeveloperSection> {
+    let id = rec.id.as_str();
     if id == "docker-prune" {
         Some(DeveloperSection::Docker)
     } else if id.starts_with("xcode-") || id == "sim-unavailable" || id == "ios-devicesupport" {
         Some(DeveloperSection::Xcode)
     } else if id.starts_with("nm-") {
-        Some(DeveloperSection::Projects)
+        if rec
+            .path
+            .components()
+            .any(|component| component.as_os_str() == ".npm")
+        {
+            Some(DeveloperSection::PackageStores)
+        } else {
+            Some(DeveloperSection::Projects)
+        }
     } else if matches!(
         id,
         "go-modcache"
@@ -187,7 +196,7 @@ fn candidates_from_recs(recs: &[Rec]) -> Vec<(DeveloperSection, DeepFinding)> {
     recs.iter()
         .filter(|rec| rec.bytes > 0)
         .filter_map(|rec| {
-            let section = deep_section(&rec.id)?;
+            let section = deep_section(rec)?;
             Some((
                 section,
                 DeepFinding {
@@ -306,7 +315,8 @@ fn assemble_report(
     }
 }
 
-pub fn build_report(recs: &[Rec], docker: DockerBreakdown) -> DeveloperReport {
+#[cfg(test)]
+fn build_report(recs: &[Rec], docker: DockerBreakdown) -> DeveloperReport {
     assemble_report(candidates_from_recs(recs), docker)
 }
 
@@ -1242,5 +1252,23 @@ mod tests {
         assert_eq!(report.docker.details[0].bytes, 900);
         assert!(!report.docker.details[0].counted);
         assert!(report.docker.details[0].explanation.contains("not added"));
+    }
+
+    #[test]
+    fn npm_npx_node_modules_are_package_store_not_a_project() {
+        let report = build_report(
+            &[rec_at(
+                "nm-1",
+                "/data/home/.npm/_npx/run/node_modules",
+                400,
+                Tier::Caution,
+                None,
+                false,
+            )],
+            DockerBreakdown::default(),
+        );
+        assert_eq!(report.sections.len(), 1);
+        assert_eq!(report.sections[0].section, DeveloperSection::PackageStores);
+        assert_eq!(report.sections[0].findings[0].project_root, None);
     }
 }

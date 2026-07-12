@@ -374,6 +374,14 @@ fn developer_tier_copy(tier: developer::EvidenceTier) -> &'static str {
     }
 }
 
+fn docker_footprint_copy(measured: bool) -> &'static str {
+    if measured {
+        "Measured on disk; inside-VM categories are explanatory and uncounted."
+    } else {
+        "Docker's on-disk footprint was not measured in this scan; inside-VM categories remain explanatory and uncounted."
+    }
+}
+
 fn draw_developer_finding(
     ui: &mut egui::Ui,
     finding: &developer::DeepFinding,
@@ -1895,6 +1903,18 @@ mod tests {
         assert_eq!(
             developer_workspace_copy(DeveloperWorkspaceState::Failed),
             "Developer workspace could not be loaded."
+        );
+    }
+
+    #[test]
+    fn docker_footprint_copy_never_claims_a_missing_measurement() {
+        assert_eq!(
+            docker_footprint_copy(true),
+            "Measured on disk; inside-VM categories are explanatory and uncounted."
+        );
+        assert_eq!(
+            docker_footprint_copy(false),
+            "Docker's on-disk footprint was not measured in this scan; inside-VM categories remain explanatory and uncounted."
         );
     }
 
@@ -4486,7 +4506,7 @@ impl App {
                                 }
                             });
                             ui.label(
-                                RichText::new(developer::DeveloperSection::Docker.explanation())
+                                RichText::new(docker_footprint_copy(docker_section.is_some()))
                                     .font(theme::body(8.5))
                                     .color(palette.muted),
                             );
