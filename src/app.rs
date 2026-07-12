@@ -21,7 +21,7 @@ use crate::offload::{
     can_confirm_offload, check_movable, classify_movable, external_volumes, has_room, run_offload,
     OffloadEvent, OffloadJob, Volume,
 };
-use crate::reclaim_plan::{GoalError, ReclaimPlan, GB};
+use crate::reclaim_plan::{build_plan, parse_goal_gb, GoalError, ReclaimPlan, GB};
 use crate::rules::{self, strip_data_root, Action, Rec, Tier};
 use crate::scan::{disk_stats, start_scan, DiskStats, Node, ScanHandle, ScanState, DATA_ROOT};
 use crate::theme;
@@ -1137,6 +1137,13 @@ struct WorkspaceLayout {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+struct GuidedLayout {
+    nav: Rect,
+    body: Rect,
+    action: Rect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct ReviewRowColumns {
     text_width: f32,
     gutter: f32,
@@ -1225,6 +1232,43 @@ fn apply_guided_plan(rows: &mut [RecRow], plan: &crate::reclaim_plan::ReclaimPla
     for row in rows {
         row.checked = ids.contains(row.rec.id.as_str()) && row.rec.tier == Tier::Safe;
     }
+}
+
+fn goal_error_copy(error: GoalError) -> &'static str {
+    match error {
+        GoalError::Empty => "Enter a goal in whole gigabytes.",
+        GoalError::NotWholeGigabytes => "Use a whole number such as 25.",
+        GoalError::Zero => "Choose at least 1 GB.",
+        GoalError::ExceedsUsedSpace => "The goal cannot exceed currently used space.",
+    }
+}
+
+fn plan_status_copy(plan: &ReclaimPlan) -> String {
+    if plan.items.is_empty() {
+        "No automatically safe targets are available in this scan.".into()
+    } else if plan.shortfall_bytes > 0 {
+        format!(
+            "Safe targets provide about {}. Your goal is short by {}.",
+            fmt_bytes(plan.selected_bytes),
+            fmt_bytes(plan.shortfall_bytes)
+        )
+    } else {
+        format!(
+            "This Safe plan reaches the goal with about {} selected.",
+            fmt_bytes(plan.selected_bytes)
+        )
+    }
+}
+
+fn guided_layout(content: Rect) -> GuidedLayout {
+    let inset = content.shrink2(vec2(12.0, 8.0));
+    let nav = Rect::from_min_size(inset.min, vec2(inset.width(), 30.0));
+    let action = Rect::from_min_max(pos2(inset.min.x, inset.max.y - 82.0), inset.max);
+    let body = Rect::from_min_max(
+        pos2(inset.min.x, nav.max.y + 6.0),
+        pos2(inset.max.x, action.min.y - 8.0),
+    );
+    GuidedLayout { nav, body, action }
 }
 
 enum MapActionRequest {
@@ -1326,6 +1370,62 @@ mod tests {
         assert!(!rows[0].checked);
         assert!(rows[1].checked);
         assert!(!rows[2].checked);
+    }
+
+    #[test]
+    fn guided_goal_errors_use_plain_actionable_copy() {
+        assert_eq!(
+            goal_error_copy(GoalError::Empty),
+            "Enter a goal in whole gigabytes."
+        );
+        assert_eq!(
+            goal_error_copy(GoalError::NotWholeGigabytes),
+            "Use a whole number such as 25."
+        );
+        assert_eq!(goal_error_copy(GoalError::Zero), "Choose at least 1 GB.");
+        assert_eq!(
+            goal_error_copy(GoalError::ExceedsUsedSpace),
+            "The goal cannot exceed currently used space."
+        );
+    }
+
+    #[test]
+    fn guided_plan_status_distinguishes_empty_shortfall_and_reached() {
+        let mut plan = fixture_plan();
+        plan.items.clear();
+        assert_eq!(
+            plan_status_copy(&plan),
+            "No automatically safe targets are available in this scan."
+        );
+
+        plan.items.push(crate::reclaim_plan::PlanItem {
+            id: "safe".into(),
+            bytes: 6 * GB,
+            estimate: false,
+        });
+        plan.selected_bytes = 6 * GB;
+        plan.shortfall_bytes = 4 * GB;
+        assert_eq!(
+            plan_status_copy(&plan),
+            "Safe targets provide about 6.0 GB. Your goal is short by 4.0 GB."
+        );
+
+        plan.selected_bytes = 11 * GB;
+        plan.shortfall_bytes = 0;
+        assert_eq!(
+            plan_status_copy(&plan),
+            "This Safe plan reaches the goal with about 11.0 GB selected."
+        );
+    }
+
+    #[test]
+    fn guided_layout_reserves_a_fixed_non_overlapping_action_area() {
+        let content = Rect::from_min_size(pos2(0.0, 0.0), vec2(390.0, 650.0));
+        let layout = guided_layout(content);
+        assert_eq!(layout.action.height(), 82.0);
+        assert!(layout.nav.max.y < layout.body.min.y);
+        assert!(layout.body.max.y < layout.action.min.y);
+        assert!(layout.body.height() > 400.0);
     }
 
     #[test]
@@ -2382,7 +2482,7 @@ impl App {
                 return;
             }
             RailView::GuidedReclaim => {
-                self.draw_reclaim_summary(ui, rect);
+                self.draw_guided_reclaim(ui, rect);
                 return;
             }
             RailView::Insights => {
@@ -2660,8 +2760,8 @@ impl App {
         );
         let button =
             Rect::from_min_max(footer.min + vec2(10.0, 66.0), footer.max - vec2(10.0, 10.0));
-        let enabled = self.recs_built && !self.recs.is_empty();
-        let response = ui.interact(button, ui.id().with("review-targets"), Sense::click());
+        let enabled = self.recs_built;
+        let response = ui.interact(button, ui.id().with("free-up-space"), Sense::click());
         let button_color = if ui.visuals().dark_mode {
             palette.safe
         } else {
@@ -2676,7 +2776,7 @@ impl App {
             button.center(),
             Align2::CENTER_CENTER,
             if enabled {
-                "Review targets"
+                "Free up space"
             } else {
                 "Scanning for targets…"
             },
@@ -2688,7 +2788,261 @@ impl App {
             },
         );
         if enabled && response.clicked() {
+            self.guide_revision = Some(self.recs_revision);
+            self.guide_acknowledged = false;
+            self.rail_view = RailView::GuidedReclaim;
+        }
+    }
+
+    fn draw_guided_reclaim(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let recs: Vec<Rec> = self.recs.iter().map(|row| row.rec.clone()).collect();
+        let plan = build_plan(&recs, self.guide_goal_bytes);
+        let current = self.guide_revision == Some(self.recs_revision) && !self.scanning();
+        let can_apply = can_apply_guided_plan(
+            self.guide_acknowledged,
+            self.guide_revision,
+            self.recs_revision,
+            self.scanning(),
+            &plan,
+        );
+        let content = panel_chrome(
+            ui,
+            rect,
+            "Free up space",
+            Some(("Safe plan · local only".into(), palette.safe)),
+        );
+        let layout = guided_layout(content);
+        let mut go_back = false;
+        let mut choose_goal = None;
+        let mut submit_custom = false;
+        let mut review_optional = false;
+        let mut apply = false;
+
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(layout.nav), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("← Reclaim summary")
+                            .font(theme::display_md(10.5))
+                            .color(palette.accent),
+                    )
+                    .frame(false),
+                )
+                .clicked()
+            {
+                go_back = true;
+            }
+        });
+
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(layout.body), |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("How much space do you need?")
+                            .font(theme::display_md(13.0))
+                            .color(palette.ink),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        for gb in [10i64, 20, 50] {
+                            let active = self.guide_goal_bytes == gb * GB;
+                            let button = egui::Button::new(
+                                RichText::new(format!("{gb} GB"))
+                                    .font(theme::body(10.5))
+                                    .color(if active { palette.canvas } else { palette.ink }),
+                            )
+                            .fill(if active {
+                                palette.accent
+                            } else {
+                                palette.surface_raised
+                            })
+                            .stroke(Stroke::new(
+                                1.0,
+                                if active { palette.accent } else { palette.edge },
+                            ));
+                            if ui.add_sized(vec2(72.0, 30.0), button).clicked() {
+                                choose_goal = Some(gb * GB);
+                            }
+                        }
+                    });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.guide_custom_gb)
+                                .hint_text("Custom GB")
+                                .desired_width(118.0),
+                        );
+                        if ui.button("Use custom goal").clicked() {
+                            submit_custom = true;
+                        }
+                    });
+                    if let Some(error) = self.guide_goal_error {
+                        ui.label(
+                            RichText::new(goal_error_copy(error))
+                                .font(theme::body(9.5))
+                                .color(palette.caution),
+                        );
+                    }
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(plan_status_copy(&plan))
+                            .font(theme::body(10.5))
+                            .color(if plan.shortfall_bytes > 0 {
+                                palette.caution
+                            } else {
+                                palette.safe
+                            }),
+                    );
+                    ui.add_space(7.0);
+
+                    for item in &plan.items {
+                        let finding = self
+                            .recs
+                            .iter()
+                            .find(|row| row.rec.id == item.id)
+                            .map(|row| &row.rec);
+                        let title = finding
+                            .map(|rec| rec.title.as_str())
+                            .unwrap_or(item.id.as_str());
+                        Frame::none()
+                            .fill(palette.surface_raised)
+                            .stroke(Stroke::new(1.0, palette.edge_soft))
+                            .rounding(Rounding::same(8.0))
+                            .inner_margin(Margin::symmetric(10.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(title)
+                                            .font(theme::display_md(10.5))
+                                            .color(palette.ink),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "{}{}",
+                                                    if item.estimate { "≈ " } else { "" },
+                                                    fmt_bytes(item.bytes)
+                                                ))
+                                                .font(theme::mono(10.0))
+                                                .color(if item.estimate {
+                                                    palette.caution
+                                                } else {
+                                                    palette.safe
+                                                }),
+                                            );
+                                        },
+                                    );
+                                });
+                                if let Some(rec) = finding {
+                                    ui.label(
+                                        RichText::new(rec.desc)
+                                            .font(theme::body(9.5))
+                                            .color(palette.muted),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("Afterward: {}", rec.restore))
+                                            .font(theme::body(9.0))
+                                            .color(palette.faint),
+                                    );
+                                }
+                            });
+                        ui.add_space(6.0);
+                    }
+
+                    if plan.caution_bytes > 0 {
+                        ui.label(
+                            RichText::new(format!(
+                                "More options: {} need review and remain unchecked.",
+                                fmt_bytes(plan.caution_bytes)
+                            ))
+                            .font(theme::body(9.5))
+                            .color(palette.caution),
+                        );
+                        if ui.button("Review optional items").clicked() {
+                            review_optional = true;
+                        }
+                    }
+                    if !current {
+                        ui.label(
+                            RichText::new("This plan is stale. Scan again before applying it.")
+                                .font(theme::body(9.5))
+                                .color(palette.caution),
+                        );
+                    }
+                });
+        });
+
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(layout.action), |ui| {
+            ui.checkbox(
+                &mut self.guide_acknowledged,
+                "I reviewed this Safe plan and will confirm each selected target.",
+            );
+            let button = egui::Button::new(
+                RichText::new("Review this plan")
+                    .font(theme::display_md(10.5))
+                    .color(if can_apply {
+                        if ui.visuals().dark_mode {
+                            palette.canvas
+                        } else {
+                            Color32::WHITE
+                        }
+                    } else {
+                        palette.muted
+                    }),
+            )
+            .fill(if can_apply {
+                palette.safe
+            } else {
+                palette.surface_raised
+            })
+            .rounding(Rounding::same(8.0));
+            if ui
+                .add_enabled_ui(can_apply, |ui| {
+                    ui.add_sized(vec2(ui.available_width(), 34.0), button)
+                })
+                .inner
+                .clicked()
+            {
+                apply = true;
+            }
+        });
+
+        if go_back {
+            self.rail_view = RailView::Summary;
+        }
+        if let Some(goal) = choose_goal {
+            if goal <= self.stats.used {
+                self.guide_goal_bytes = goal;
+                self.guide_goal_error = None;
+                self.guide_acknowledged = false;
+                self.guide_revision = Some(self.recs_revision);
+            } else {
+                self.guide_goal_error = Some(GoalError::ExceedsUsedSpace);
+            }
+        }
+        if submit_custom {
+            match parse_goal_gb(&self.guide_custom_gb, self.stats.used) {
+                Ok(goal) => {
+                    self.guide_goal_bytes = goal;
+                    self.guide_goal_error = None;
+                    self.guide_acknowledged = false;
+                    self.guide_revision = Some(self.recs_revision);
+                }
+                Err(error) => self.guide_goal_error = Some(error),
+            }
+        }
+        if review_optional {
+            self.guided_goal_for_review = None;
             self.rail_view = RailView::Reclaim;
+        }
+        if apply {
+            self.accept_guided_plan(&plan);
         }
     }
 
