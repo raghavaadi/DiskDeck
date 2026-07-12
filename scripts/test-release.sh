@@ -77,6 +77,7 @@ assert_fail diskdeck_extract_release_notes \
 
 BUNDLER="$ROOT/make-app.sh"
 RELEASE_CHECKER="$ROOT/scripts/check-release-artifact.sh"
+RELEASE_SCRIPT="$ROOT/scripts/release.sh"
 
 [ -f "$RELEASE_CHECKER" ] \
     || fail "missing scripts/check-release-artifact.sh"
@@ -118,5 +119,45 @@ fi
 grep -Fq 'public releases require Developer ID Application' \
     "$TMP/development-identity.out" \
     || fail "development identity rejection was not actionable"
+
+diskdeck_extract_release_notes \
+    "$ROOT/CHANGELOG.md" v1.0.0 "$TMP/v1-notes.md"
+grep -Fq '### Highlights' "$TMP/v1-notes.md" \
+    || fail "v1 release notes are missing highlights"
+grep -Fq 'Developer ID-signed' "$TMP/v1-notes.md" \
+    || fail "v1 release notes do not explain distribution trust"
+
+[ -f "$RELEASE_SCRIPT" ] || fail "missing scripts/release.sh"
+for required in \
+    'git status --porcelain --untracked-files=normal' \
+    'git fetch --quiet origin main' \
+    'repos/raghavaadi/DiskDeck/commits/main' \
+    'gh run list' \
+    'security find-identity' \
+    'notarytool history' \
+    'git ls-remote' \
+    'gh release view' \
+    'scripts/check-release-artifact.sh' \
+    '--draft' \
+    '--verify-tag' \
+    'gh release download' \
+    'shasum -a 256 -c' \
+    '--draft=false'
+do
+    grep -Fq -- "$required" "$RELEASE_SCRIPT" \
+        || fail "release orchestrator is missing: $required"
+done
+
+for forbidden in \
+    '--clobber' \
+    'git push --force' \
+    'git push --tags' \
+    'git tag -f' \
+    'gh release delete'
+do
+    if grep -Fq -- "$forbidden" "$RELEASE_SCRIPT"; then
+        fail "release orchestrator contains forbidden mutation: $forbidden"
+    fi
+done
 
 echo "release contract checks passed"
