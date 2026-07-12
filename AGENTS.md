@@ -88,7 +88,8 @@ changing anything; most lines exist because something broke.
 
 ```sh
 cargo test       # all unit tests must pass before any commit
-./make-app.sh    # THE ship path: build + bundle + codesign + install + dist zip
+./make-app.sh    # signed local QA + install + explicitly non-public zip
+scripts/release.sh v1.0.0 # public Developer ID/notarization preflight
 cargo run        # dev run only — unbundled binary has its own TCC identity,
                  # so FDA grants made for the .app won't apply to it
 ```
@@ -97,8 +98,15 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
   TCC identity per build → macOS re-asks all folder permissions. That exact
   complaint ("it keeps asking permission") is why `make-app.sh` signs with a
   stable cert and why `dist/DiskDeck.zip` bundles
-  `scripts/install.command` — a recipient-facing installer that copies to
-  /Applications, clears quarantine, opens the FDA pane, and launches.
+  `scripts/install.command` — a recipient-facing installer that verifies the
+  notarized app with Gatekeeper, copies to /Applications, opens the FDA pane,
+  and launches. It must never clear quarantine or bypass Gatekeeper.
+- **Never publish Apple Development, ad-hoc, or unsigned output.** The default
+  `make-app.sh` ZIP is local QA only. A public GitHub Release must go through
+  `scripts/release.sh`, require `Developer ID Application`, hardened runtime,
+  secure timestamp, notarization + stapling, Gatekeeper assessment, checksum,
+  and downloaded-draft verification. Signing/notary secrets stay in Keychain,
+  never GitHub Actions or Git.
 - `assets/logo.svg` is the single canonical transparent brand mark.
   `scripts/render-icon.cjs` synchronizes the three SVG layers in
   `assets/AppIcon.icon`, derives the universal blue fallback at

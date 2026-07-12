@@ -58,6 +58,28 @@ Move to SSD, Review targets, a recommendation, or the reclaim control.
 
 Do not share or commit the generated app, ZIP, `target`, `dist`, or AppleDouble `._*` files.
 
+## Maintainer releases
+
+The normal `./make-app.sh` output is for signed local QA. It may use an Apple
+Development identity so Full Disk Access survives local rebuilds, but it is
+not a public distribution artifact.
+
+Public releases run only from clean, synchronized `main` after exact-commit CI
+passes. They require a Keychain-resident `Developer ID Application` identity
+selected through `DISKDECK_SIGN_IDENTITY` and a notary credential stored under
+the `DISKDECK_NOTARY_PROFILE` Keychain profile name. Never put certificate
+exports, passwords, API keys, or app-specific passwords in this repository or
+GitHub Actions.
+
+```sh
+scripts/release.sh v1.0.0            # non-mutating preflight
+scripts/release.sh v1.0.0 --publish  # notarize, draft, verify, publish
+```
+
+The publisher never substitutes an unsigned, ad-hoc, or Apple Development
+build. If the required distribution identity or notary profile is missing,
+the release remains unpublished.
+
 ## Safety expectations
 
 - Scanning stays read-only.

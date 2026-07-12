@@ -160,4 +160,27 @@ do
     fi
 done
 
+grep -Fq 'https://github.com/raghavaadi/DiskDeck/releases/latest' \
+    "$ROOT/README.md" \
+    || fail "README does not link the latest public release"
+grep -Fq 'Developer ID-signed and notarized' "$ROOT/README.md" \
+    || fail "README does not describe public release trust"
+grep -Fq 'local QA' "$ROOT/README.md" \
+    || fail "README does not distinguish make-app.sh local output"
+grep -Fq 'scripts/release.sh v1.0.0' "$ROOT/CONTRIBUTING.md" \
+    || fail "CONTRIBUTING.md has no maintainer release command"
+for instructions in "$ROOT/AGENTS.md" "$ROOT/CLAUDE.md"; do
+    grep -Fq 'Never publish Apple Development' "$instructions" \
+        || fail "$(basename "$instructions") does not block development-signed releases"
+done
+
+INSTALLER="$ROOT/scripts/install.command"
+if grep -Fq 'xattr -dr com.apple.quarantine' "$INSTALLER"; then
+    fail "public installer must not bypass Gatekeeper by clearing quarantine"
+fi
+grep -Fq 'codesign --verify --deep --strict' "$INSTALLER" \
+    || fail "installer does not verify the bundled app signature"
+grep -Fq 'spctl --assess --type execute' "$INSTALLER" \
+    || fail "installer does not ask Gatekeeper to assess the bundled app"
+
 echo "release contract checks passed"
