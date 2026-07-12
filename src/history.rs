@@ -8,7 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::scan::Node;
 
-const MAGIC: &[u8; 8] = b"DDHIST1\0";
+const MAGIC_V1: &[u8; 8] = b"DDHIST1\0";
+const MAGIC_V2: &[u8; 8] = b"DDHIST2\0";
 const MIN_GROWTH_BYTES: i64 = 10 << 20;
 const MAX_ENTRIES: usize = 1_000_000;
 const MAX_PATH_BYTES: usize = 1 << 20;
@@ -61,6 +62,7 @@ pub struct RecurringGrowth {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GrowthWatch {
     pub timeline: Vec<TimelinePoint>,
+    pub capacity: Vec<crate::forecast::CapacityPoint>,
     pub recurring: Vec<RecurringGrowth>,
     pub watched: Vec<FolderSeries>,
 }
@@ -84,6 +86,8 @@ struct Snapshot {
     captured_at_ms: i64,
     root: PathBuf,
     total_bytes: i64,
+    volume_total_bytes: Option<i64>,
+    volume_free_bytes: Option<i64>,
     entries: Vec<Entry>,
 }
 
@@ -146,9 +150,11 @@ fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, String> {
         return Err("snapshot has too many entries".into());
     }
     let mut out = Vec::new();
-    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(MAGIC_V2);
     out.extend_from_slice(&snapshot.captured_at_ms.to_le_bytes());
     out.extend_from_slice(&snapshot.total_bytes.to_le_bytes());
+    out.extend_from_slice(&snapshot.volume_total_bytes.unwrap_or(-1).to_le_bytes());
+    out.extend_from_slice(&snapshot.volume_free_bytes.unwrap_or(-1).to_le_bytes());
     push_path(&mut out, &snapshot.root)?;
     push_u32(&mut out, snapshot.entries.len())?;
     for entry in &snapshot.entries {
@@ -190,11 +196,23 @@ fn read_path(cursor: &mut Cursor<&[u8]>) -> Result<PathBuf, String> {
 
 fn decode(bytes: &[u8]) -> Result<Snapshot, String> {
     let mut cursor = Cursor::new(bytes);
-    if &read_exact::<8>(&mut cursor)? != MAGIC {
+    let magic = read_exact::<8>(&mut cursor)?;
+    let version = if &magic == MAGIC_V2 {
+        2
+    } else if &magic == MAGIC_V1 {
+        1
+    } else {
         return Err("snapshot format is not supported".into());
-    }
+    };
     let captured_at_ms = read_i64(&mut cursor)?;
     let total_bytes = read_i64(&mut cursor)?;
+    let (volume_total_bytes, volume_free_bytes) = if version == 2 {
+        let total = read_i64(&mut cursor)?;
+        let free = read_i64(&mut cursor)?;
+        ((total >= 0).then_some(total), (free >= 0).then_some(free))
+    } else {
+        (None, None)
+    };
     let root = read_path(&mut cursor)?;
     let count = read_u32(&mut cursor)?;
     if count > MAX_ENTRIES {
@@ -225,11 +243,13 @@ fn decode(bytes: &[u8]) -> Result<Snapshot, String> {
         captured_at_ms,
         root,
         total_bytes,
+        volume_total_bytes,
+        volume_free_bytes,
         entries,
     })
 }
 
-fn capture(root: &Arc<Node>, captured_at_ms: i64) -> Snapshot {
+fn capture(root: &Arc<Node>, captured_at_ms: i64, capacity: Option<(i64, i64)>) -> Snapshot {
     fn walk(root_path: &Path, node: &Arc<Node>, entries: &mut Vec<Entry>) {
         for child in node.kids() {
             let Ok(path) = child.path.strip_prefix(root_path) else {
@@ -253,6 +273,8 @@ fn capture(root: &Arc<Node>, captured_at_ms: i64) -> Snapshot {
         captured_at_ms,
         root: root.path.clone(),
         total_bytes: root.bytes(),
+        volume_total_bytes: capacity.map(|value| value.0),
+        volume_free_bytes: capacity.map(|value| value.1),
         entries,
     }
 }
@@ -426,6 +448,16 @@ fn build_growth_watch(snapshots: &[Snapshot], watched_paths: &[PathBuf]) -> Grow
             total_bytes: snapshot.total_bytes,
         })
         .collect();
+    let capacity = snapshots
+        .iter()
+        .filter_map(|snapshot| {
+            Some(crate::forecast::CapacityPoint {
+                captured_at_ms: snapshot.captured_at_ms,
+                total_bytes: snapshot.volume_total_bytes?,
+                free_bytes: snapshot.volume_free_bytes?,
+            })
+        })
+        .collect();
 
     #[derive(Clone, Copy)]
     struct Aggregate {
@@ -530,6 +562,7 @@ fn build_growth_watch(snapshots: &[Snapshot], watched_paths: &[PathBuf]) -> Grow
         .collect();
     GrowthWatch {
         timeline,
+        capacity,
         recurring,
         watched,
     }
@@ -616,7 +649,10 @@ pub fn record_scan(root: Arc<Node>, dir: PathBuf, tx: Sender<HistoryEvent>) -> R
                 .duration_since(UNIX_EPOCH)
                 .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
                 .unwrap_or(0);
-            let current = capture(&root, captured_at_ms);
+            let stats = crate::scan::disk_stats();
+            let capacity = (stats.total > 0 && stats.free >= 0 && stats.free <= stats.total)
+                .then_some((stats.total, stats.free));
+            let current = capture(&root, captured_at_ms, capacity);
             let event = match record(&dir, &current) {
                 Ok(Some(summary)) => HistoryEvent::Compared(summary),
                 Ok(None) => HistoryEvent::BaselineSaved,
@@ -646,12 +682,86 @@ mod tests {
         }
     }
 
+    fn snapshot_with_capacity(
+        captured_at_ms: i64,
+        total_bytes: i64,
+        capacity: Option<(i64, i64)>,
+    ) -> Snapshot {
+        Snapshot {
+            captured_at_ms,
+            root: PathBuf::from("/System/Volumes/Data"),
+            total_bytes,
+            volume_total_bytes: capacity.map(|value| value.0),
+            volume_free_bytes: capacity.map(|value| value.1),
+            entries: vec![],
+        }
+    }
+
+    fn encode_v1_for_test(snapshot: &Snapshot) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC_V1);
+        out.extend_from_slice(&snapshot.captured_at_ms.to_le_bytes());
+        out.extend_from_slice(&snapshot.total_bytes.to_le_bytes());
+        push_path(&mut out, &snapshot.root).unwrap();
+        push_u32(&mut out, snapshot.entries.len()).unwrap();
+        for entry in &snapshot.entries {
+            push_path(&mut out, &entry.path).unwrap();
+            out.extend_from_slice(&entry.bytes.to_le_bytes());
+            out.extend_from_slice(&entry.files.to_le_bytes());
+            out.push(u8::from(entry.is_dir));
+        }
+        out
+    }
+
+    #[test]
+    fn v2_codec_round_trips_capacity_observation() {
+        let snapshot = Snapshot {
+            captured_at_ms: 123,
+            root: PathBuf::from("/System/Volumes/Data"),
+            total_bytes: 456,
+            volume_total_bytes: Some(250_000_000_000),
+            volume_free_bytes: Some(80_000_000_000),
+            entries: vec![entry("Users", 789)],
+        };
+        assert_eq!(decode(&encode(&snapshot).unwrap()).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn v1_codec_remains_readable_without_capacity_evidence() {
+        let bytes = encode_v1_for_test(&Snapshot {
+            captured_at_ms: 123,
+            root: PathBuf::from("/System/Volumes/Data"),
+            total_bytes: 456,
+            volume_total_bytes: None,
+            volume_free_bytes: None,
+            entries: vec![],
+        });
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded.volume_total_bytes, None);
+        assert_eq!(decoded.volume_free_bytes, None);
+    }
+
+    #[test]
+    fn growth_watch_exposes_only_complete_capacity_pairs() {
+        let snapshots = vec![
+            snapshot_with_capacity(10, 100, Some((250, 80))),
+            snapshot_with_capacity(20, 110, None),
+            snapshot_with_capacity(30, 120, Some((250, 70))),
+        ];
+        let watch = build_growth_watch(&snapshots, &[]);
+        assert_eq!(watch.capacity.len(), 2);
+        assert_eq!(watch.capacity[0].free_bytes, 80);
+        assert_eq!(watch.capacity[1].free_bytes, 70);
+    }
+
     #[test]
     fn compare_orders_large_positive_growers_and_keeps_total_change() {
         let previous = Snapshot {
             captured_at_ms: 100,
             root: PathBuf::from("/System/Volumes/Data"),
             total_bytes: 200 * MB,
+            volume_total_bytes: None,
+            volume_free_bytes: None,
             entries: vec![
                 entry("a", 50 * MB),
                 entry("gone", 100 * MB),
@@ -662,6 +772,8 @@ mod tests {
             captured_at_ms: 200,
             root: previous.root.clone(),
             total_bytes: 159 * MB,
+            volume_total_bytes: None,
+            volume_free_bytes: None,
             entries: vec![
                 entry("a", 70 * MB),
                 entry("new", 30 * MB),
@@ -685,12 +797,16 @@ mod tests {
             captured_at_ms: 1,
             root: PathBuf::from("/one"),
             total_bytes: 1,
+            volume_total_bytes: None,
+            volume_free_bytes: None,
             entries: vec![],
         };
         let current = Snapshot {
             captured_at_ms: 2,
             root: PathBuf::from("/two"),
             total_bytes: 2,
+            volume_total_bytes: None,
+            volume_free_bytes: None,
             entries: vec![],
         };
         assert_eq!(compare(&previous, &current), None);
@@ -703,6 +819,8 @@ mod tests {
             captured_at_ms: 123,
             root: PathBuf::from("/System/Volumes/Data"),
             total_bytes: 456,
+            volume_total_bytes: None,
+            volume_free_bytes: None,
             entries: vec![Entry {
                 path: PathBuf::from(raw),
                 bytes: 789,
@@ -724,6 +842,8 @@ mod tests {
             captured_at_ms: 1,
             root: PathBuf::from("/System/Volumes/Data"),
             total_bytes: 2,
+            volume_total_bytes: None,
+            volume_free_bytes: None,
             entries: vec![entry("Users", 3)],
         };
         let bytes = encode(&snapshot).unwrap();
@@ -748,7 +868,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(scan.state(), ScanState::Done);
-        let snapshot = capture(&scan.root, 123);
+        let snapshot = capture(&scan.root, 123, None);
         assert_eq!(snapshot.captured_at_ms, 123);
         assert_eq!(snapshot.root, tmp.path());
         assert_eq!(snapshot.total_bytes, scan.root.bytes());
@@ -771,6 +891,8 @@ mod tests {
                 captured_at_ms,
                 root: PathBuf::from("/System/Volumes/Data"),
                 total_bytes: captured_at_ms,
+                volume_total_bytes: None,
+                volume_free_bytes: None,
                 entries: vec![],
             };
             record(tmp.path(), &snapshot).unwrap();
@@ -786,6 +908,8 @@ mod tests {
             captured_at_ms: 10,
             root: PathBuf::from("/System/Volumes/Data"),
             total_bytes: 100,
+            volume_total_bytes: None,
+            volume_free_bytes: None,
             entries: vec![],
         };
         record(tmp.path(), &previous).unwrap();
@@ -794,6 +918,8 @@ mod tests {
             captured_at_ms: 1_000,
             root: previous.root.clone(),
             total_bytes: 125,
+            volume_total_bytes: None,
+            volume_free_bytes: None,
             entries: vec![],
         };
         let summary = record(tmp.path(), &current).unwrap().unwrap();
@@ -808,18 +934,24 @@ mod tests {
                 captured_at_ms: 10,
                 root: PathBuf::from("/System/Volumes/Data"),
                 total_bytes: 100 * MB,
+                volume_total_bytes: None,
+                volume_free_bytes: None,
                 entries: vec![entry("Users/project", 20 * MB), entry("Users/new", 0)],
             },
             Snapshot {
                 captured_at_ms: 20,
                 root: PathBuf::from("/System/Volumes/Data"),
                 total_bytes: 140 * MB,
+                volume_total_bytes: None,
+                volume_free_bytes: None,
                 entries: vec![entry("Users/project", 35 * MB), entry("Users/new", 25 * MB)],
             },
             Snapshot {
                 captured_at_ms: 30,
                 root: PathBuf::from("/System/Volumes/Data"),
                 total_bytes: 180 * MB,
+                volume_total_bytes: None,
+                volume_free_bytes: None,
                 entries: vec![entry("Users/project", 50 * MB), entry("Users/new", 30 * MB)],
             },
         ];
@@ -849,24 +981,32 @@ mod tests {
                 captured_at_ms: 10,
                 root: root.clone(),
                 total_bytes: 20 * MB,
+                volume_total_bytes: None,
+                volume_free_bytes: None,
                 entries: vec![entry("Users/project", 20 * MB)],
             },
             Snapshot {
                 captured_at_ms: 20,
                 root: root.clone(),
                 total_bytes: 40 * MB,
+                volume_total_bytes: None,
+                volume_free_bytes: None,
                 entries: vec![entry("Users/project", 40 * MB)],
             },
             Snapshot {
                 captured_at_ms: 30,
                 root: root.clone(),
                 total_bytes: 60 * MB,
+                volume_total_bytes: None,
+                volume_free_bytes: None,
                 entries: vec![entry("Users/project", 60 * MB)],
             },
             Snapshot {
                 captured_at_ms: 40,
                 root,
                 total_bytes: 35 * MB,
+                volume_total_bytes: None,
+                volume_free_bytes: None,
                 entries: vec![entry("Users/project", 35 * MB)],
             },
         ];
@@ -884,6 +1024,8 @@ mod tests {
                 captured_at_ms: 10,
                 root: root.clone(),
                 total_bytes: 100 * MB,
+                volume_total_bytes: None,
+                volume_free_bytes: None,
                 entries: vec![
                     entry("Users", 50 * MB),
                     entry("Users/project", 45 * MB),
@@ -894,6 +1036,8 @@ mod tests {
                 captured_at_ms: 20,
                 root: root.clone(),
                 total_bytes: 130 * MB,
+                volume_total_bytes: None,
+                volume_free_bytes: None,
                 entries: vec![
                     entry("Users", 80 * MB),
                     entry("Users/project", 73 * MB),
@@ -904,6 +1048,8 @@ mod tests {
                 captured_at_ms: 30,
                 root,
                 total_bytes: 160 * MB,
+                volume_total_bytes: None,
+                volume_free_bytes: None,
                 entries: vec![
                     entry("Users", 110 * MB),
                     entry("Users/project", 101 * MB),
