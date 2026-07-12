@@ -188,6 +188,7 @@ enum RailView {
     Monitor,
     FileReview,
     ReclaimHistory,
+    External,
 }
 
 fn rail_back_target(view: RailView) -> Option<RailView> {
@@ -201,7 +202,8 @@ fn rail_back_target(view: RailView) -> Option<RailView> {
         | RailView::Leftovers
         | RailView::Monitor
         | RailView::FileReview
-        | RailView::ReclaimHistory => Some(RailView::Insights),
+        | RailView::ReclaimHistory
+        | RailView::External => Some(RailView::Insights),
     }
 }
 
@@ -252,6 +254,24 @@ struct ExternalSession {
     completion_reported: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ExternalVolumeRowLayout {
+    content: Rect,
+    actions: Rect,
+}
+
+impl ExternalVolumeRowLayout {
+    fn from_rect(row: Rect) -> Self {
+        let action_width = 120.0_f32.min(row.width());
+        let actions = Rect::from_min_max(pos2(row.max.x - action_width, row.min.y), row.max);
+        let content = Rect::from_min_max(
+            row.min,
+            pos2((actions.min.x - 10.0).max(row.min.x), row.max.y),
+        );
+        Self { content, actions }
+    }
+}
+
 fn can_start_external_scan(
     internal_scanning: bool,
     external_scanning: bool,
@@ -263,6 +283,24 @@ fn can_start_external_scan(
 
 fn external_session_connected(expected: &MountedVolume, current: Option<&MountedVolume>) -> bool {
     current.is_some_and(|current| is_same_mount(expected, current))
+}
+
+fn external_scan_action(
+    state: Option<ScanState>,
+    connected: bool,
+    can_start: bool,
+) -> (&'static str, bool) {
+    if !connected {
+        ("Disconnected", false)
+    } else if state == Some(ScanState::Running) {
+        ("Scanning…", false)
+    } else if !can_start {
+        ("Finish current task", false)
+    } else if matches!(state, Some(ScanState::Done | ScanState::Aborted)) {
+        ("Scan again", true)
+    } else {
+        ("Scan read-only", true)
+    }
 }
 
 struct SearchDialog {
@@ -2767,6 +2805,50 @@ mod tests {
             rail_back_target(RailView::ReclaimHistory),
             Some(RailView::Insights)
         );
+        assert_eq!(
+            rail_back_target(RailView::External),
+            Some(RailView::Insights)
+        );
+    }
+
+    #[test]
+    fn external_volume_rows_reserve_a_non_overlapping_action_column() {
+        for width in [340.0, 420.0] {
+            let row = Rect::from_min_size(Pos2::ZERO, vec2(width, 84.0));
+            let layout = ExternalVolumeRowLayout::from_rect(row);
+            assert!(layout.content.max.x <= layout.actions.min.x);
+            assert!(row.contains_rect(layout.content));
+            assert!(row.contains_rect(layout.actions));
+            assert!(layout.actions.width() >= 112.0);
+        }
+    }
+
+    #[test]
+    fn external_volume_action_copy_is_explicit_for_every_state() {
+        assert_eq!(
+            external_scan_action(None, true, true),
+            ("Scan read-only", true)
+        );
+        assert_eq!(
+            external_scan_action(Some(ScanState::Running), true, false),
+            ("Scanning…", false)
+        );
+        assert_eq!(
+            external_scan_action(Some(ScanState::Done), true, true),
+            ("Scan again", true)
+        );
+        assert_eq!(
+            external_scan_action(Some(ScanState::Aborted), true, true),
+            ("Scan again", true)
+        );
+        assert_eq!(
+            external_scan_action(Some(ScanState::Done), false, false),
+            ("Disconnected", false)
+        );
+        assert_eq!(
+            external_scan_action(None, true, false),
+            ("Finish current task", false)
+        );
     }
 
     #[test]
@@ -3378,34 +3460,59 @@ impl App {
 
     fn draw_capacity(&self, ui: &egui::Ui, rect: Rect) {
         let palette = theme::palette(ui.ctx());
-        let content = panel_chrome(
-            ui,
-            rect,
-            "Macintosh HD · storage used",
-            Some((
-                if self.scanning() {
-                    "Scanning".to_string()
-                } else if self.scan_done() {
-                    "Scan complete".to_string()
-                } else {
-                    "Ready".to_string()
+        let external = (self.rail_view == RailView::External)
+            .then_some(self.external_session.as_ref())
+            .flatten();
+        let (title, stats, scanning, done, disconnected) = if let Some(session) = external {
+            let used = session
+                .volume
+                .total_bytes
+                .saturating_sub(session.volume.free_bytes);
+            let used_pct = if session.volume.total_bytes > 0 {
+                used as f64 / session.volume.total_bytes as f64 * 100.0
+            } else {
+                0.0
+            };
+            (
+                format!("{} · storage used", session.volume.name),
+                DiskStats {
+                    total: session.volume.total_bytes,
+                    free: session.volume.free_bytes,
+                    used,
+                    used_pct,
                 },
-                if self.scanning() {
-                    palette.accent
-                } else {
-                    palette.faint
-                },
-            )),
-        );
+                session.scan.state() == ScanState::Running,
+                session.scan.state() == ScanState::Done,
+                session.disconnected,
+            )
+        } else {
+            (
+                "Macintosh HD · storage used".into(),
+                self.stats,
+                self.scanning(),
+                self.scan_done(),
+                false,
+            )
+        };
+        let (state_copy, state_color) = if disconnected {
+            ("Disconnected", palette.caution)
+        } else if scanning {
+            ("Scanning", palette.accent)
+        } else if done {
+            ("Scan complete", palette.faint)
+        } else {
+            ("Ready", palette.faint)
+        };
+        let content = panel_chrome(ui, rect, &title, Some((state_copy.into(), state_color)));
         let p = ui.painter();
         let c = pos2(content.max.x - 54.0, content.center().y + 1.0);
         let r = 32.0;
         p.circle_stroke(c, r, Stroke::new(7.0, palette.edge_soft));
-        let frac = (self.stats.used_pct / 100.0).clamp(0.0, 1.0) as f32;
+        let frac = (stats.used_pct / 100.0).clamp(0.0, 1.0) as f32;
         if frac > 0.005 {
-            let color = if self.stats.used_pct >= 85.0 {
+            let color = if stats.used_pct >= 85.0 {
                 palette.danger
-            } else if self.stats.used_pct >= 70.0 {
+            } else if stats.used_pct >= 70.0 {
                 palette.caution
             } else {
                 palette.accent
@@ -3418,14 +3525,14 @@ impl App {
         p.text(
             c,
             Align2::CENTER_CENTER,
-            format!("{:.0}%", self.stats.used_pct),
+            format!("{:.0}%", stats.used_pct),
             theme::mono(11.0),
             palette.ink,
         );
         p.text(
             content.min + vec2(16.0, 12.0),
             Align2::LEFT_TOP,
-            fmt_bytes(self.stats.used),
+            fmt_bytes(stats.used),
             theme::display(30.0),
             palette.ink,
         );
@@ -3434,13 +3541,15 @@ impl App {
             Align2::LEFT_TOP,
             format!(
                 "of {}  ·  {} free",
-                fmt_bytes(self.stats.total),
-                fmt_bytes(self.stats.free),
+                fmt_bytes(stats.total),
+                fmt_bytes(stats.free),
             ),
             theme::body(11.0),
             palette.muted,
         );
-        let history = if self.history_baseline {
+        let history = if external.is_some() {
+            None
+        } else if self.history_baseline {
             Some((
                 "Baseline saved · compare after the next scan".to_string(),
                 palette.muted,
@@ -3998,6 +4107,10 @@ impl App {
             }
             RailView::ReclaimHistory => {
                 self.draw_reclaim_history(ui, rect);
+                return;
+            }
+            RailView::External => {
+                self.draw_external_drives(ui, rect);
                 return;
             }
             RailView::Reclaim => {}
@@ -4746,6 +4859,15 @@ impl App {
             .count();
         let entries = [
             (
+                "External drives",
+                if self.external_volumes.is_empty() {
+                    "Mounted local drives · scan only when you ask".into()
+                } else {
+                    format!("{} mounted local drive(s)", self.external_volumes.len())
+                },
+                RailView::External,
+            ),
+            (
                 "Reclaim History",
                 if self.reclaim_history.items.is_empty() {
                     "Cleanup receipts and verified Trash recovery".into()
@@ -4830,8 +4952,312 @@ impl App {
                 RailView::Growth => self.begin_growth_refresh(),
                 RailView::Developer => self.begin_developer_refresh(false),
                 RailView::Apfs => self.begin_apfs_refresh(),
+                RailView::External => self.refresh_external_volumes(),
                 _ => {}
             }
+        }
+    }
+
+    fn draw_external_drives(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let palette = theme::palette(ui.ctx());
+        let content = panel_chrome(
+            ui,
+            rect,
+            "External drives",
+            Some(("local · explicit scans".into(), palette.faint)),
+        );
+        let semantic_title = Rect::from_min_size(rect.min + vec2(10.0, 2.0), vec2(180.0, 28.0));
+        ui.interact(
+            semantic_title,
+            ui.id().with("external-drives-heading"),
+            Sense::hover(),
+        )
+        .widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "External drives")
+        });
+
+        let nav = Rect::from_min_size(
+            content.min + vec2(10.0, 4.0),
+            vec2(content.width() - 20.0, 32.0),
+        );
+        let mut go_back = false;
+        let mut refresh = false;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(nav), |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("← Insights")
+                                .font(theme::display_md(10.5))
+                                .color(palette.accent),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text("Back to Insights")
+                    .clicked()
+                {
+                    go_back = true;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Refresh drives")
+                                    .font(theme::body(10.0))
+                                    .color(palette.accent),
+                            )
+                            .fill(palette.surface_raised)
+                            .stroke(Stroke::new(1.0, palette.edge_soft))
+                            .rounding(Rounding::same(7.0)),
+                        )
+                        .clicked()
+                    {
+                        refresh = true;
+                    }
+                });
+            });
+        });
+
+        let body = Rect::from_min_max(
+            pos2(content.min.x + 10.0, nav.max.y + 4.0),
+            pos2(content.max.x - 10.0, content.max.y - 6.0),
+        );
+        let volumes = self.external_volumes.clone();
+        let internal_scanning = self.scanning();
+        let external_scanning = self.external_scanning();
+        let mutation_busy = self.mutation_busy();
+        let file_review_running = self.file_review_rx.is_some();
+        let can_start = can_start_external_scan(
+            internal_scanning,
+            external_scanning,
+            mutation_busy,
+            file_review_running,
+        );
+        let mut start_scan = None;
+        let mut stop_scan = false;
+
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(body), |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    Frame::none()
+                        .fill(palette.accent_dim(12))
+                        .stroke(Stroke::new(1.0, palette.accent_dim(75)))
+                        .rounding(Rounding::same(9.0))
+                        .inner_margin(Margin::symmetric(10.0, 9.0))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new("Read-only map")
+                                    .font(theme::display_md(10.5))
+                                    .color(palette.accent),
+                            );
+                            ui.label(
+                                RichText::new("Cleanup stays on Macintosh HD. External drives are never erased or moved by this view.")
+                                    .font(theme::body(9.5))
+                                    .color(palette.muted),
+                            );
+                        });
+                    ui.add_space(8.0);
+
+                    if self
+                        .external_session
+                        .as_ref()
+                        .is_some_and(|session| session.disconnected)
+                    {
+                        ui.label(
+                            RichText::new("Disconnected — refresh drives and scan again.")
+                                .font(theme::body(10.0))
+                                .color(palette.caution),
+                        );
+                        ui.add_space(7.0);
+                    }
+
+                    if volumes.is_empty() {
+                        ui.add_space(18.0);
+                        ui.label(
+                            RichText::new("No local external drives are mounted.")
+                                .font(theme::display_md(11.0))
+                                .color(palette.ink),
+                        );
+                        ui.label(
+                            RichText::new("Connect a drive, then choose Refresh drives.")
+                                .font(theme::body(9.5))
+                                .color(palette.muted),
+                        );
+                    }
+
+                    for (index, volume) in volumes.iter().enumerate() {
+                        let row = ui
+                            .allocate_exact_size(vec2(ui.available_width(), 88.0), Sense::hover())
+                            .0;
+                        let layout = ExternalVolumeRowLayout::from_rect(row.shrink(10.0));
+                        ui.painter().rect_filled(
+                            row,
+                            Rounding::same(10.0),
+                            palette.surface_raised,
+                        );
+                        ui.painter().rect_stroke(
+                            row,
+                            Rounding::same(10.0),
+                            Stroke::new(1.0, palette.edge_soft),
+                        );
+
+                        let session = self.external_session.as_ref().filter(|session| {
+                            is_same_mount(&session.volume, volume)
+                        });
+                        let connected = session.is_none_or(|session| !session.disconnected);
+                        let state = session.map(|session| session.scan.state());
+                        let (action_copy, action_enabled) =
+                            external_scan_action(state, connected, can_start);
+                        let used = volume.total_bytes.saturating_sub(volume.free_bytes);
+                        let used_pct = if volume.total_bytes > 0 {
+                            used as f64 / volume.total_bytes as f64 * 100.0
+                        } else {
+                            0.0
+                        };
+
+                        ui.allocate_new_ui(
+                            egui::UiBuilder::new().max_rect(layout.content),
+                            |ui| {
+                                ui.label(
+                                    RichText::new(tail_str(&volume.name, 28))
+                                        .font(theme::display_md(11.5))
+                                        .color(palette.ink),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} · {:.0}% used · {} free",
+                                        volume.fs_type.to_uppercase(),
+                                        used_pct,
+                                        fmt_bytes(volume.free_bytes)
+                                    ))
+                                    .font(theme::mono(9.0))
+                                    .color(palette.muted),
+                                );
+                                ui.label(
+                                    RichText::new(if volume.read_only {
+                                        "Read-only media · safe to map"
+                                    } else {
+                                        "Writable local drive · map is still read-only"
+                                    })
+                                    .font(theme::body(8.8))
+                                    .color(if volume.read_only {
+                                        palette.caution
+                                    } else {
+                                        palette.faint
+                                    }),
+                                );
+                            },
+                        );
+
+                        ui.allocate_new_ui(
+                            egui::UiBuilder::new().max_rect(layout.actions),
+                            |ui| {
+                                ui.vertical_centered(|ui| {
+                                    let action = egui::Button::new(
+                                        RichText::new(action_copy)
+                                            .font(theme::body(9.5))
+                                            .color(if action_enabled {
+                                                palette.accent
+                                            } else {
+                                                palette.faint
+                                            }),
+                                    )
+                                    .fill(palette.surface)
+                                    .stroke(Stroke::new(1.0, palette.edge_soft))
+                                    .rounding(Rounding::same(7.0));
+                                    if ui
+                                        .add_enabled_ui(action_enabled, |ui| {
+                                            ui.add_sized(vec2(112.0, 29.0), action)
+                                        })
+                                        .inner
+                                        .clicked()
+                                    {
+                                        start_scan = Some(index);
+                                    }
+                                    if state == Some(ScanState::Running)
+                                        && ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new("Stop")
+                                                        .font(theme::body(9.0))
+                                                        .color(palette.caution),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .clicked()
+                                    {
+                                        stop_scan = true;
+                                    }
+                                });
+                            },
+                        );
+                        ui.add_space(7.0);
+                    }
+
+                    if let Some(session) = self.external_session.as_ref() {
+                        ui.add_space(2.0);
+                        let state = session.scan.state();
+                        let elapsed = if state == ScanState::Running {
+                            session.scan.started.elapsed()
+                        } else {
+                            Duration::from_millis(
+                                session.scan.duration_ms.load(Relaxed).max(0) as u64,
+                            )
+                        };
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {} items · {} · {}",
+                                if state == ScanState::Running {
+                                    "Mapping"
+                                } else if state == ScanState::Done {
+                                    "Map complete"
+                                } else {
+                                    "Map stopped"
+                                },
+                                fmt_count(session.scan.root.files()),
+                                fmt_bytes(session.scan.root.bytes()),
+                                fmt_elapsed(elapsed)
+                            ))
+                            .font(theme::mono(9.0))
+                            .color(if state == ScanState::Running {
+                                palette.accent
+                            } else {
+                                palette.muted
+                            }),
+                        );
+                        if state == ScanState::Running {
+                            let current = session
+                                .scan
+                                .current
+                                .lock()
+                                .ok()
+                                .map(|value| value.clone())
+                                .unwrap_or_default();
+                            ui.label(
+                                RichText::new(tail_str(&current, 48))
+                                    .font(theme::mono(8.5))
+                                    .color(palette.faint),
+                            );
+                        }
+                    }
+                });
+        });
+
+        if go_back {
+            self.rail_view = RailView::Insights;
+        }
+        if refresh {
+            self.refresh_external_volumes();
+        }
+        if stop_scan {
+            if let Some(session) = &self.external_session {
+                session.scan.cancel.store(true, Relaxed);
+                self.ops(OpsKind::Amber, "external scan stop requested");
+            }
+        }
+        if let Some(index) = start_scan {
+            self.begin_external_scan(index);
         }
     }
 
