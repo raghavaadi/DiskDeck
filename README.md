@@ -142,7 +142,8 @@ Safety is structural, not advisory:
 
 ## Installation
 
-**Requirements:** Apple Silicon Mac, macOS 12+.
+**Requirements:** A Mac with Apple Silicon or a 64-bit Intel processor,
+macOS 12+.
 
 **Public download:** [Latest DiskDeck Release](https://github.com/raghavaadi/DiskDeck/releases/latest).
 Every public app is **Developer ID-signed and notarized**, stapled, checked by
@@ -279,8 +280,17 @@ cargo test          # scanner, rules KB, cleaner, offload, and treemap tests
 cargo run           # dev run (unbundled; FDA grants won't apply to it)
 ```
 
-Requires Rust 1.80+. Bare `cargo build` output is unsigned, and every unsigned
-build re-triggers the permission prompts described above. `make-app.sh`
+Requires Rust 1.80+. Install both ship targets once before running
+`make-app.sh`:
+
+```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+```
+
+The signed QA and public ZIP are one Universal 2 app; `cargo run` remains the
+fast native-only development loop. Bare `cargo build` output is unsigned, and
+every unsigned build re-triggers the permission prompts described above.
+`make-app.sh`
 defaults to a stable **local QA** identity (override with
 `DISKDECK_SIGN_IDENTITY`; the legacy `HEADROOM_SIGN_IDENTITY` override is also
 supported), installs to `/Applications/DiskDeck.app`, and produces a ZIP that

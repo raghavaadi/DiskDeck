@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: macOS checks
+  apple-silicon-test:
+    name: Apple Silicon checks
     runs-on: macos-14
     timeout-minutes: 20
 
@@ -30,6 +30,9 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Verify native architecture
+        run: test "$(uname -m)" = arm64
+
       - name: Check formatting
         run: cargo fmt -- --check
 
@@ -39,6 +42,9 @@ jobs:
       - name: Test distribution artifact guard
         run: scripts/test-package-artifact.sh
 
+      - name: Test universal binary contract
+        run: scripts/test-universal.sh
+
       - name: Test release contract
         run: scripts/test-release.sh
 
@@ -47,6 +53,31 @@ jobs:
 
       - name: Test personal-GitHub identity guard
         run: scripts/test-pre-push.sh
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
+  intel-test:
+    name: Intel checks
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install stable Rust with rustfmt
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Verify native architecture
+        run: test "$(uname -m)" = x86_64
+
+      - name: Check formatting
+        run: cargo fmt -- --check
 
       - name: Run Rust tests
         run: cargo test --locked

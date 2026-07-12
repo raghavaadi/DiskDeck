@@ -29,7 +29,8 @@ Versioning, and dates use ISO 8601.
 
 ### Distribution
 
-- Supports Apple Silicon Macs running macOS 12 or later.
+- Ships one Universal 2 (arm64 + x86_64) app for Apple Silicon and 64-bit Intel
+  Macs running macOS 12 or later.
 - The public `DiskDeck.zip` contains `DiskDeck.app` and the one-time
   `Install DiskDeck.command` helper.
 - Public binaries are Developer ID-signed, hardened-runtime enabled,
@@ -39,7 +40,6 @@ Versioning, and dates use ISO 8601.
 
 ### Known limitations
 
-- Intel Macs are not supported in v1.0.0.
 - Snapshot count is reported when available, but macOS does not expose a
   dependable exact reclaimable snapshot or purgeable-byte figure for DiskDeck
   to promise.

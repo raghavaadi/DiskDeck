@@ -41,6 +41,9 @@ grep -Fq 'Timestamp=' "$DETAILS" \
 grep -Fq 'TeamIdentifier=65KMSM8WL8' "$DETAILS" \
     || fail "release app is not signed by DiskDeck team 65KMSM8WL8"
 
+"$ROOT/scripts/check-universal-binary.sh" \
+    "$APP/Contents/MacOS/diskdeck" >/dev/null
+
 BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST" 2>/dev/null) \
     || fail "cannot read release bundle identifier"
 [ "$BUNDLE_ID" = 'com.buddyhq.headroom-rs' ] \
