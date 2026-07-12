@@ -45,9 +45,9 @@ if [ "$DISTRIBUTION" = "1" ]; then
   }
 fi
 
-REQUIRED_TARGETS='aarch64-apple-darwin x86_64-apple-darwin'
+REQUIRED_TARGETS=(aarch64-apple-darwin x86_64-apple-darwin)
 INSTALLED_TARGETS="$(rustup target list --installed)"
-for TARGET in $REQUIRED_TARGETS; do
+for TARGET in "${REQUIRED_TARGETS[@]}"; do
   printf '%s\n' "$INSTALLED_TARGETS" | grep -Fxq "$TARGET" || {
     echo "✗ Install universal Rust targets once:" >&2
     echo "  rustup target add aarch64-apple-darwin x86_64-apple-darwin" >&2
@@ -64,7 +64,7 @@ BUILD="$(mktemp -d "${TMPDIR:-/tmp}/diskdeck.XXXXXX")"
 trap 'rm -rf "$BUILD"' EXIT
 APP="$BUILD/DiskDeck.app"
 
-for TARGET in $REQUIRED_TARGETS; do
+for TARGET in "${REQUIRED_TARGETS[@]}"; do
   cargo build --release --locked --target "$TARGET"
 done
 

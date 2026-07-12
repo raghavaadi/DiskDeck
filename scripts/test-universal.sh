@@ -38,6 +38,8 @@ RELEASE_CHECKER="$ROOT/scripts/check-release-artifact.sh"
 for required in \
     'aarch64-apple-darwin' \
     'x86_64-apple-darwin' \
+    'REQUIRED_TARGETS=(' \
+    '"${REQUIRED_TARGETS[@]}"' \
     'MACOSX_DEPLOYMENT_TARGET=12.0' \
     'cargo build --release --locked --target "$TARGET"' \
     'lipo -create' \
