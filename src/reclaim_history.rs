@@ -702,7 +702,6 @@ pub enum RestoreEvent {
 struct RestoreOutcome {
     bytes: i64,
     origin: PathBuf,
-    restored_at_ms: i64,
     warning: Option<String>,
 }
 
@@ -729,7 +728,6 @@ fn perform_restore(job: &RestoreJob) -> Result<RestoreOutcome, String> {
     Ok(RestoreOutcome {
         bytes: plan.bytes,
         origin: plan.origin,
-        restored_at_ms,
         warning,
     })
 }
@@ -1045,10 +1043,9 @@ mod tests {
         assert_eq!(fs::read(&fixture.origin).unwrap(), b"fixture");
         assert!(!fixture.trash_item.exists());
         assert_eq!(outcome.bytes, 7);
-        assert_eq!(
-            load_receipts(&fixture.history).unwrap()[0].restored_at_ms,
-            Some(outcome.restored_at_ms)
-        );
+        assert!(load_receipts(&fixture.history).unwrap()[0]
+            .restored_at_ms
+            .is_some());
     }
 
     #[test]

@@ -24,9 +24,9 @@ use crate::offload::{
     OffloadEvent, OffloadJob, Volume,
 };
 use crate::reclaim_history::{
-    history_path_for_home, now_ms, refresh_history, run_restore as run_trash_restore,
-    ReceiptAction, ReceiptItem, ReceiptState, ReclaimHistory, RestoreEvent as TrashRestoreEvent,
-    RestoreJob as TrashRestoreJob,
+    can_confirm_restore as receipt_can_confirm_restore, history_path_for_home, now_ms,
+    refresh_history, run_restore as run_trash_restore, ReceiptAction, ReceiptItem, ReceiptState,
+    ReclaimHistory, RestoreEvent as TrashRestoreEvent, RestoreJob as TrashRestoreJob,
 };
 use crate::reclaim_plan::{
     build_plan, parse_goal_gb, GoalError, OutcomeTracker, ReclaimOutcome, ReclaimPlan, GB,
@@ -1758,7 +1758,7 @@ fn receipt_age_copy(completed_at_ms: i64) -> String {
 }
 
 fn can_start_trash_restore(acknowledged: bool, state: &ReceiptState, mutation_busy: bool) -> bool {
-    acknowledged && *state == ReceiptState::Ready && !mutation_busy
+    receipt_can_confirm_restore(acknowledged, state) && !mutation_busy
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4267,6 +4267,15 @@ impl App {
         let palette = theme::palette(ui.ctx());
         let meta = format!("{} receipts · local only", self.reclaim_history.items.len());
         let content = panel_chrome(ui, rect, "Reclaim History", Some((meta, palette.faint)));
+        let semantic_title = Rect::from_min_size(rect.min + vec2(10.0, 2.0), vec2(160.0, 28.0));
+        ui.interact(
+            semantic_title,
+            ui.id().with("reclaim-history-heading"),
+            Sense::hover(),
+        )
+        .widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Reclaim History")
+        });
         let nav = Rect::from_min_size(
             content.min + vec2(10.0, 4.0),
             vec2(content.width() - 20.0, 30.0),

@@ -10,6 +10,7 @@ fail() {
 
 for path in \
     scripts/ui-smoke.applescript \
+    scripts/focus-window.swift \
     scripts/right-click.swift \
     scripts/test-signed-ui.sh
 do
@@ -21,6 +22,7 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 osacompile -o "$TMP/ui-smoke.scpt" "$ROOT/scripts/ui-smoke.applescript"
 /usr/bin/swiftc -typecheck "$ROOT/scripts/right-click.swift"
+/usr/bin/swiftc -typecheck "$ROOT/scripts/focus-window.swift"
 sh -n "$ROOT/scripts/test-signed-ui.sh"
 
 grep -q 'guided-reclaim-visible' "$ROOT/scripts/ui-smoke.applescript" || \
@@ -46,6 +48,9 @@ grep -q 'my openSummary(appGroup)' "$ROOT/scripts/ui-smoke.applescript" || \
 
 grep -q '^RIGHT_CLICK_ATTEMPTS=3$' "$ROOT/scripts/test-signed-ui.sh" || \
     fail "signed UI smoke must retry a lost context-menu click"
+
+grep -q 'scripts/focus-window.swift' "$ROOT/scripts/test-signed-ui.sh" || \
+    fail "signed UI smoke must focus the native window before AccessKit checks"
 
 if grep -Eiq 'click[^[:cntrl:]]*(Hold to reclaim|Review targets|Review this plan|Open Trash|Scan again|Scan now|Move to SSD|Reveal in Finder|Restore to Mac|Hold to restore|Start review scan|button "Refresh"|button "Watch"|button "Unwatch")' \
     "$ROOT/scripts/ui-smoke.applescript" "$ROOT/scripts/test-signed-ui.sh"

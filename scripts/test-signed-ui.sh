@@ -21,6 +21,8 @@ ui() {
     osascript "$APPLESCRIPT" "$@"
 }
 
+/usr/bin/swift "$ROOT/scripts/focus-window.swift" DiskDeck
+sleep 0.5
 ui check
 ui guided-reclaim-visible
 ui escape
