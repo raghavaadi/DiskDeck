@@ -2145,6 +2145,13 @@ struct GuidedLayout {
     action: Rect,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GuideLayout {
+    nav: Rect,
+    body: Rect,
+    action: Rect,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GuidePrimaryAction {
     enabled: bool,
@@ -2388,6 +2395,17 @@ fn guided_layout(content: Rect) -> GuidedLayout {
         pos2(inset.max.x, action.min.y - 8.0),
     );
     GuidedLayout { nav, body, action }
+}
+
+fn guide_layout(content: Rect) -> GuideLayout {
+    let inset = content.shrink2(vec2(12.0, 8.0));
+    let nav = Rect::from_min_size(inset.min, vec2(inset.width(), 30.0));
+    let action = Rect::from_min_max(pos2(inset.min.x, inset.max.y - 76.0), inset.max);
+    let body = Rect::from_min_max(
+        pos2(inset.min.x, nav.max.y + 6.0),
+        pos2(inset.max.x, action.min.y - 8.0),
+    );
+    GuideLayout { nav, body, action }
 }
 
 enum MapActionRequest {
@@ -3016,6 +3034,16 @@ mod tests {
                 label: "Free up space",
             }
         );
+    }
+
+    #[test]
+    fn guide_layout_keeps_navigation_body_and_actions_separate() {
+        let content = Rect::from_min_size(Pos2::ZERO, vec2(320.0, 600.0));
+        let layout = guide_layout(content);
+        assert!(layout.nav.max.y < layout.body.min.y);
+        assert!(layout.body.max.y < layout.action.min.y);
+        assert_eq!(layout.action.max, content.shrink2(vec2(12.0, 8.0)).max);
+        assert!(layout.body.height() > 300.0);
     }
 
     #[test]
@@ -4687,23 +4715,42 @@ impl App {
             vec2(rect.width(), 34.0),
         );
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(moved_rect), |ui| {
-            let button = egui::Button::new(
-                RichText::new("Insights")
-                    .font(theme::display_md(10.5))
-                    .color(palette.accent),
-            )
-            .fill(palette.surface)
-            .stroke(Stroke::new(1.0, palette.edge_soft))
-            .rounding(Rounding::same(8.0));
-            if ui
-                .add_sized(ui.available_size(), button)
-                .on_hover_text(
-                    "Reclaim history, moved items, growth, developer storage, APFS, and app leftovers",
+            ui.horizontal(|ui| {
+                let width = ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(0.0);
+                let guide = egui::Button::new(
+                    RichText::new("Guide")
+                        .font(theme::display_md(10.5))
+                        .color(palette.accent),
                 )
-                .clicked()
-            {
-                self.rail_view = RailView::Insights;
-            }
+                .fill(palette.surface)
+                .stroke(Stroke::new(1.0, palette.edge_soft))
+                .rounding(Rounding::same(8.0));
+                if ui
+                    .add_sized(vec2(width, 34.0), guide)
+                    .on_hover_text("Learn the safe DiskDeck workflow")
+                    .clicked()
+                {
+                    self.rail_view = RailView::Guide;
+                }
+
+                let insights = egui::Button::new(
+                    RichText::new("Insights")
+                        .font(theme::display_md(10.5))
+                        .color(palette.accent),
+                )
+                .fill(palette.surface)
+                .stroke(Stroke::new(1.0, palette.edge_soft))
+                .rounding(Rounding::same(8.0));
+                if ui
+                    .add_sized(vec2(width, 34.0), insights)
+                    .on_hover_text(
+                        "Reclaim history, moved items, growth, developer storage, APFS, and app leftovers",
+                    )
+                    .clicked()
+                {
+                    self.rail_view = RailView::Insights;
+                }
+            });
         });
         let last_reclaim = self.reclaim_history.items.first().map(|last| {
             format!(
@@ -5202,11 +5249,226 @@ impl App {
             "Safety & Quick Start",
             Some(("read-only guide".into(), palette.faint)),
         );
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content), |ui| {
-            if ui.button("← Insights").clicked() {
+        let semantic_title = Rect::from_min_size(rect.min + vec2(10.0, 2.0), vec2(220.0, 28.0));
+        ui.interact(
+            semantic_title,
+            ui.id().with("safety-quick-start-heading"),
+            Sense::hover(),
+        )
+        .widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Safety & Quick Start")
+        });
+        let layout = guide_layout(content);
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(layout.nav), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("← Insights")
+                            .font(theme::display_md(10.5))
+                            .color(palette.accent),
+                    )
+                    .frame(false),
+                )
+                .clicked()
+            {
                 self.rail_view = RailView::Insights;
             }
         });
+
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(layout.body), |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("YOUR DISKDECK FLIGHT PLAN")
+                            .font(theme::display_md(9.5))
+                            .color(palette.faint),
+                    );
+                    ui.add_space(5.0);
+                    ui.label(
+                        RichText::new("SCAN · EXPLORE · REVIEW · HOLD")
+                            .font(theme::display(11.0))
+                            .color(palette.accent),
+                    );
+
+                    let (flight_rect, _) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
+                    let flight = flight_rect.shrink2(vec2(12.0, 0.0));
+                    let y = flight.center().y;
+                    ui.painter().line_segment(
+                        [pos2(flight.min.x, y), pos2(flight.max.x, y)],
+                        Stroke::new(1.5, palette.accent_dim(90)),
+                    );
+                    for index in 0..4 {
+                        let x = egui::lerp(flight.min.x..=flight.max.x, index as f32 / 3.0);
+                        ui.painter().circle_filled(
+                            pos2(x, y),
+                            if index == 3 { 5.0 } else { 3.5 },
+                            if index == 3 {
+                                palette.safe
+                            } else {
+                                palette.accent
+                            },
+                        );
+                    }
+
+                    let sections = [
+                        (
+                            "01",
+                            "READ-ONLY FIRST",
+                            "Scanning and exploring the map do not change files. Use Find or right-click a real map item to inspect it without memorizing shortcuts.",
+                            palette.accent,
+                        ),
+                        (
+                            "02",
+                            "SAFE OR CAUTION",
+                            "Safe targets rebuild automatically. Caution targets may need a download or reinstall, so DiskDeck never pre-selects them.",
+                            palette.caution,
+                        ),
+                        (
+                            "03",
+                            "REVIEW BEFORE RECLAIM",
+                            "Trash is recoverable by default. A target must be checked, then the final control held for 0.9 seconds before anything runs.",
+                            palette.safe,
+                        ),
+                        (
+                            "DEV",
+                            "DEVELOPER PATH",
+                            "Developer Lens explains Docker, Xcode, projects, and package stores. Growth Watch and APFS accounting stay evidence-only.",
+                            palette.caution,
+                        ),
+                    ];
+
+                    for (marker, title, detail, tone) in sections {
+                        egui::Frame::none()
+                            .fill(palette.surface)
+                            .stroke(Stroke::new(1.0, palette.edge_soft))
+                            .rounding(Rounding::same(9.0))
+                            .inner_margin(Margin::symmetric(10.0, 9.0))
+                            .show(ui, |ui| {
+                                ui.horizontal_top(|ui| {
+                                    let (marker_rect, _) =
+                                        ui.allocate_exact_size(vec2(31.0, 31.0), Sense::hover());
+                                    ui.painter().rect_filled(
+                                        marker_rect,
+                                        Rounding::same(8.0),
+                                        Color32::from_rgba_unmultiplied(
+                                            tone.r(),
+                                            tone.g(),
+                                            tone.b(),
+                                            if ui.visuals().dark_mode { 35 } else { 22 },
+                                        ),
+                                    );
+                                    ui.painter().text(
+                                        marker_rect.center(),
+                                        Align2::CENTER_CENTER,
+                                        marker,
+                                        theme::mono(9.0),
+                                        tone,
+                                    );
+                                    ui.add_space(2.0);
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            RichText::new(title)
+                                                .font(theme::display_md(10.0))
+                                                .color(tone),
+                                        );
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(detail)
+                                                    .font(theme::body(9.5))
+                                                    .color(palette.muted),
+                                            )
+                                            .wrap(),
+                                        );
+                                    });
+                                });
+                            });
+                        ui.add_space(7.0);
+                    }
+
+                    ui.label(
+                        RichText::new("Local by design · no telemetry · no hidden scan")
+                            .font(theme::body(9.5))
+                            .color(palette.faint),
+                    );
+                    ui.add_space(4.0);
+                });
+        });
+
+        let action =
+            guide_primary_action(self.recs_built && !self.recs.is_empty(), self.scanning());
+        let mut explore_clicked = false;
+        let mut reclaim_clicked = false;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(layout.action), |ui| {
+            ui.label(
+                RichText::new("This guide only navigates. It never starts storage work.")
+                    .font(theme::body(9.0))
+                    .color(palette.faint),
+            );
+            ui.add_space(5.0);
+            ui.horizontal(|ui| {
+                let width = ((ui.available_width() - 8.0) / 2.0).max(0.0);
+                explore_clicked = ui
+                    .add_sized(
+                        vec2(width, 36.0),
+                        egui::Button::new(
+                            RichText::new("Explore the map")
+                                .font(theme::display_md(10.0))
+                                .color(palette.ink),
+                        )
+                        .fill(palette.surface)
+                        .stroke(Stroke::new(1.0, palette.edge))
+                        .rounding(Rounding::same(8.0)),
+                    )
+                    .clicked();
+                let action_label = if action.label == "Scanning for safe targets…" {
+                    "Scanning…"
+                } else {
+                    action.label
+                };
+                reclaim_clicked = ui
+                    .add_enabled_ui(action.enabled, |ui| {
+                        ui.add_sized(
+                            vec2(width, 36.0),
+                            egui::Button::new(
+                                RichText::new(action_label)
+                                    .font(theme::display_md(10.0))
+                                    .color(if action.enabled {
+                                        palette.accent
+                                    } else {
+                                        palette.faint
+                                    }),
+                            )
+                            .fill(if action.enabled {
+                                palette.accent_dim(18)
+                            } else {
+                                palette.surface_raised
+                            })
+                            .stroke(Stroke::new(
+                                1.0,
+                                if action.enabled {
+                                    palette.accent
+                                } else {
+                                    palette.edge_soft
+                                },
+                            ))
+                            .rounding(Rounding::same(8.0)),
+                        )
+                    })
+                    .inner
+                    .on_hover_text(action.label)
+                    .clicked();
+            });
+        });
+
+        if explore_clicked {
+            self.rail_view = RailView::Summary;
+        } else if action.enabled && reclaim_clicked {
+            self.guide_revision = Some(self.recs_revision);
+            self.guide_acknowledged = false;
+            self.rail_view = RailView::GuidedReclaim;
+        }
     }
 
     fn draw_insights(&mut self, ui: &mut egui::Ui, rect: Rect) {
@@ -5246,6 +5508,11 @@ impl App {
             .filter(|item| item.state != MoveState::Restored)
             .count();
         let entries = [
+            (
+                "Safety & Quick Start",
+                "How scanning, review, reclaim, and recovery fit together".into(),
+                RailView::Guide,
+            ),
             (
                 "External drives",
                 if self.external_volumes.is_empty() {
