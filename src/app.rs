@@ -23,6 +23,7 @@ use crate::offload::{
     can_confirm_offload, check_movable, classify_movable, external_volumes, has_room, run_offload,
     OffloadEvent, OffloadJob, Volume,
 };
+use crate::reclaim_history::history_path_for_home;
 use crate::reclaim_plan::{
     build_plan, parse_goal_gb, GoalError, OutcomeTracker, ReclaimOutcome, ReclaimPlan, GB,
 };
@@ -1193,6 +1194,7 @@ impl App {
                     freed,
                     pending,
                     message,
+                    history_warning,
                 } => {
                     if let Some(tracker) = &mut self.active_guided_reclaim {
                         tracker.record_result(&id, ok);
@@ -1224,6 +1226,9 @@ impl App {
                         }
                         if !message.is_empty() {
                             self.ops(OpsKind::Dim, format!("  {message}"));
+                        }
+                        if let Some(warning) = history_warning {
+                            self.ops(OpsKind::Amber, warning);
                         }
                     } else {
                         self.ops(OpsKind::Err, format!("✗ {title} — {message}"));
@@ -1479,7 +1484,7 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         self.clean_rx = Some(rx);
         self.cleaning = true;
-        run_clean(jobs, tx);
+        run_clean(jobs, history_path_for_home(&Self::home_dir()), tx);
     }
 
     fn accept_guided_plan(&mut self, plan: &ReclaimPlan) {

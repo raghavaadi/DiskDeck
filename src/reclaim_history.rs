@@ -3,10 +3,11 @@
 //! Receipt data is evidence only. It never becomes cleanup or command
 //! authority, and corrupt history is never overwritten automatically.
 
-use std::ffi::OsString;
+use std::ffi::{CString, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,10 +30,50 @@ pub struct FileIdentity {
     pub kind: FileKind,
 }
 
+impl FileIdentity {
+    pub fn at(path: &Path) -> Result<Self, String> {
+        let metadata = path
+            .symlink_metadata()
+            .map_err(|error| format!("read item identity: {error}"))?;
+        let kind = if metadata.file_type().is_file() {
+            FileKind::File
+        } else if metadata.file_type().is_dir() {
+            FileKind::Directory
+        } else {
+            return Err("item is not a regular file or directory".into());
+        };
+        Ok(Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            kind,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TrashEvidence {
     pub path: PathBuf,
     pub identity: FileIdentity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TrashOutcome {
+    Exact(TrashEvidence),
+    FinderManaged,
+}
+
+pub fn rename_exclusive(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let result =
+        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

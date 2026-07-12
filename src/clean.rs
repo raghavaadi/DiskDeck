@@ -4,6 +4,10 @@
 //! fallback only), delete clears write-protected dirs, commands run in a
 //! login shell and are only ever the vetted strings stored on a Rec.
 
+use crate::reclaim_history::{
+    append_receipt, new_event_id, now_ms, rename_exclusive, FileIdentity, Receipt, ReceiptAction,
+    TrashEvidence, TrashOutcome,
+};
 use crate::rules::{strip_data_root, Action, Rec};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -12,25 +16,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Move a file/dir to the Trash. Rename first; Finder as fallback.
-pub fn trash_path(p: &Path) -> Result<(), String> {
-    if let Some(home) = std::env::var_os("HOME") {
-        let trash = PathBuf::from(home).join(".Trash");
-        if let Some(name) = p.file_name() {
-            let mut target = trash.join(name);
-            if target.symlink_metadata().is_ok() {
-                let ts = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                target = trash.join(format!("{} {ts}", name.to_string_lossy()));
-            }
-            if fs::rename(p, &target).is_ok() {
-                return Ok(());
-            }
-        }
-    }
-    // fallback: Finder (requires the Automation permission; may prompt once)
+fn finder_trash(p: &Path) -> Result<(), String> {
     let script = r#"on run argv
 	tell application "Finder" to delete (POSIX file (item 1 of argv) as alias)
 end run"#;
@@ -47,6 +33,68 @@ end run"#;
             String::from_utf8_lossy(&out.stderr).trim()
         ))
     }
+}
+
+fn trash_path_with_home_and_finder<F>(
+    p: &Path,
+    home: &Path,
+    finder: F,
+) -> Result<TrashOutcome, String>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    let trash = home.join(".Trash");
+    if let Some(name) = p.file_name() {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        for sequence in 0..1000 {
+            let target = if sequence == 0 {
+                trash.join(name)
+            } else if sequence == 1 {
+                trash.join(format!("{} {timestamp}", name.to_string_lossy()))
+            } else {
+                trash.join(format!(
+                    "{} {timestamp} {}",
+                    name.to_string_lossy(),
+                    sequence - 1
+                ))
+            };
+            match rename_exclusive(p, &target) {
+                Ok(()) => {
+                    return match FileIdentity::at(&target) {
+                        Ok(identity) => Ok(TrashOutcome::Exact(TrashEvidence {
+                            path: target,
+                            identity,
+                        })),
+                        Err(identity_error) => match rename_exclusive(&target, p) {
+                            Ok(()) => Err(format!(
+                                "moved item identity unavailable; restored original: {identity_error}"
+                            )),
+                            Err(rollback) => Err(format!(
+                                "moved item identity unavailable ({identity_error}); restore original manually from {} ({rollback})",
+                                target.display()
+                            )),
+                        },
+                    };
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => break,
+            }
+        }
+    }
+    finder(p)?;
+    Ok(TrashOutcome::FinderManaged)
+}
+
+/// Move a file/dir to the Trash. Rename first; Finder as fallback.
+pub fn trash_path(p: &Path) -> Result<TrashOutcome, String> {
+    let Some(home) = std::env::var_os("HOME") else {
+        finder_trash(p)?;
+        return Ok(TrashOutcome::FinderManaged);
+    };
+    trash_path_with_home_and_finder(p, &PathBuf::from(home), finder_trash)
 }
 
 /// Permanently remove, clearing read-only bits if needed (go-modcache style).
@@ -185,6 +233,7 @@ pub enum CleanEvent {
         freed: i64,
         pending: i64,
         message: String,
+        history_warning: Option<String>,
     },
     Done {
         freed: i64,
@@ -194,7 +243,7 @@ pub enum CleanEvent {
 
 /// Execute jobs sequentially on a background thread, streaming events.
 /// Commands only ever run the vetted string stored on the Rec.
-pub fn run_clean(jobs: Vec<CleanJob>, tx: Sender<CleanEvent>) {
+pub fn run_clean(jobs: Vec<CleanJob>, history_path: PathBuf, tx: Sender<CleanEvent>) {
     std::thread::Builder::new()
         .name("clean".into())
         .spawn(move || {
@@ -215,33 +264,68 @@ pub fn run_clean(jobs: Vec<CleanJob>, tx: Sender<CleanEvent>) {
                     job.action
                 };
 
-                let (ok, freed, pending, message) = match action {
+                let (ok, freed, pending, message, trash_outcome) = match action {
                     Action::Command => {
                         let cmd = rec.command.unwrap_or("");
                         let (out, ok) = run_command(cmd, Duration::from_secs(15 * 60));
                         let after = quick_du(&fs_path);
                         let freed = (before - after).max(0);
-                        (ok, freed, 0, tail_lines(&out, if ok { 2 } else { 3 }))
+                        (ok, freed, 0, tail_lines(&out, if ok { 2 } else { 3 }), None)
                     }
                     Action::Trash if rec.allow_trash => match trash_path(&fs_path) {
-                        Ok(()) => (
+                        Ok(outcome) => (
                             true,
                             0,
                             before,
                             "moved to Trash — empty it to free the space".into(),
+                            Some(outcome),
                         ),
-                        Err(e) => (false, 0, 0, e),
+                        Err(e) => (false, 0, 0, e, None),
                     },
                     Action::Delete if rec.allow_delete => match delete_path(&fs_path) {
-                        Ok(()) => (true, before, 0, String::new()),
-                        Err(e) => (false, 0, 0, e),
+                        Ok(()) => (true, before, 0, String::new(), None),
+                        Err(e) => (false, 0, 0, e, None),
                     },
                     Action::Empty => match empty_dir(&fs_path) {
-                        Ok(()) => (true, before - quick_du(&fs_path), 0, String::new()),
-                        Err(e) => (false, 0, 0, e),
+                        Ok(()) => (true, before - quick_du(&fs_path), 0, String::new(), None),
+                        Err(e) => (false, 0, 0, e, None),
                     },
-                    _ => (false, 0, 0, "action not allowed for this item".into()),
+                    _ => (false, 0, 0, "action not allowed for this item".into(), None),
                 };
+
+                let history_warning = ok
+                    .then(|| {
+                        let (trash, finder_managed) = match trash_outcome {
+                            Some(TrashOutcome::Exact(evidence)) => (Some(evidence), false),
+                            Some(TrashOutcome::FinderManaged) => (None, true),
+                            None => (None, false),
+                        };
+                        let action = match action {
+                            Action::Trash => ReceiptAction::Trash,
+                            Action::Delete => ReceiptAction::Delete,
+                            Action::Empty => ReceiptAction::Empty,
+                            Action::Command => ReceiptAction::Command,
+                        };
+                        append_receipt(
+                            &history_path,
+                            Receipt {
+                                event_id: new_event_id(),
+                                completed_at_ms: now_ms(),
+                                rec_id: rec.id.clone(),
+                                title: rec.title.clone(),
+                                origin: fs_path.clone(),
+                                action,
+                                freed_bytes: freed.max(0),
+                                pending_bytes: pending.max(0),
+                                trash,
+                                finder_managed,
+                                restored_at_ms: None,
+                            },
+                        )
+                        .err()
+                        .map(|error| format!("reclaim history unavailable — {error}"))
+                    })
+                    .flatten();
 
                 total_freed += freed;
                 total_pending += pending;
@@ -252,6 +336,7 @@ pub fn run_clean(jobs: Vec<CleanJob>, tx: Sender<CleanEvent>) {
                     freed,
                     pending,
                     message,
+                    history_warning,
                 });
             }
             let _ = tx.send(CleanEvent::Done {
@@ -315,7 +400,34 @@ pub fn fmt_count(n: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reclaim_history::{load_receipts, FileIdentity, ReceiptAction, TrashOutcome};
+    use crate::rules::Tier;
     use std::io::Write;
+
+    fn fixture_rec(path: PathBuf, action: Action) -> Rec {
+        Rec {
+            id: "fixture-clean".into(),
+            title: "Fixture clean".into(),
+            path,
+            display: "fixture".into(),
+            bytes: 0,
+            tier: Tier::Safe,
+            desc: "fixture",
+            restore: "fixture",
+            action,
+            command: None,
+            allow_trash: true,
+            allow_delete: true,
+            note: String::new(),
+            estimate: false,
+        }
+    }
+
+    fn collect_clean(jobs: Vec<CleanJob>, history: PathBuf) -> Vec<CleanEvent> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        run_clean(jobs, history, tx);
+        rx.into_iter().collect()
+    }
 
     fn write_file(path: &Path, size: usize) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -377,5 +489,96 @@ mod tests {
         let t0 = Instant::now();
         let (_, ok) = run_command("sleep 30", Duration::from_millis(400));
         assert!(!ok && t0.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn trash_path_returns_collision_safe_exact_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let trash = home.join(".Trash");
+        let origin = home.join("Library/Caches/cache");
+        write_file(&origin.join("data.bin"), 16);
+        fs::create_dir_all(trash.join("cache")).unwrap();
+
+        let outcome = trash_path_with_home_and_finder(&origin, &home, |_| {
+            panic!("Finder fallback must not run after a direct rename")
+        })
+        .unwrap();
+        let TrashOutcome::Exact(evidence) = outcome else {
+            panic!("expected exact rename")
+        };
+        assert_eq!(evidence.path.parent(), Some(trash.as_path()));
+        assert_ne!(evidence.path, trash.join("cache"));
+        assert_eq!(FileIdentity::at(&evidence.path).unwrap(), evidence.identity);
+        assert!(!origin.exists());
+    }
+
+    #[test]
+    fn exclusive_rename_refuses_an_existing_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::write(&source, b"source").unwrap();
+        fs::write(&destination, b"destination").unwrap();
+
+        assert!(rename_exclusive(&source, &destination).is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read(&destination).unwrap(), b"destination");
+    }
+
+    #[test]
+    fn successful_clean_stays_successful_when_receipt_write_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("cache");
+        write_file(&target.join("data.bin"), 16);
+        let history = temp.path().join("reclaim-history.ddrh");
+        fs::write(&history, b"corrupt").unwrap();
+        let events = collect_clean(
+            vec![CleanJob {
+                rec: fixture_rec(target.clone(), Action::Delete),
+                action: Action::Delete,
+            }],
+            history,
+        );
+        let result = events
+            .iter()
+            .find_map(|event| match event {
+                CleanEvent::Result {
+                    ok,
+                    history_warning,
+                    ..
+                } => Some((*ok, history_warning.as_deref())),
+                _ => None,
+            })
+            .unwrap();
+        assert!(result.0);
+        assert!(result.1.unwrap().contains("history"));
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn command_action_is_locked_to_the_vetted_rec_command_and_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("command.log");
+        let command: &'static str = Box::leak(
+            format!("printf vetted-command > {}", log.to_string_lossy()).into_boxed_str(),
+        );
+        let mut rec = fixture_rec(temp.path().join("command-target"), Action::Command);
+        rec.command = Some(command);
+        let history = temp.path().join("reclaim-history.ddrh");
+        let events = collect_clean(
+            vec![CleanJob {
+                rec,
+                action: Action::Trash,
+            }],
+            history.clone(),
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, CleanEvent::Result { ok: true, .. })));
+        assert_eq!(fs::read_to_string(log).unwrap(), "vetted-command");
+        let receipts = load_receipts(&history).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].action, ReceiptAction::Command);
     }
 }
