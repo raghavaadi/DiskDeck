@@ -26,6 +26,9 @@ sh -n "$ROOT/scripts/test-signed-ui.sh"
 grep -q 'guided-reclaim-visible' "$ROOT/scripts/ui-smoke.applescript" || \
     fail "UI smoke runner must expose guided-reclaim-visible"
 
+grep -q 'my openSummary(appGroup)' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "guided smoke must reset a previously open detail rail"
+
 grep -q '^RIGHT_CLICK_ATTEMPTS=3$' "$ROOT/scripts/test-signed-ui.sh" || \
     fail "signed UI smoke must retry a lost context-menu click"
 

@@ -77,6 +77,22 @@ on openInsights(appGroup)
     end tell
 end openInsights
 
+on openSummary(appGroup)
+    tell application "System Events"
+        repeat 3 times
+            if exists button "Free up space" of appGroup then return
+            if exists button "← Insights" of appGroup then
+                click button "← Insights" of appGroup
+            else if exists button "← Reclaim summary" of appGroup then
+                click button "← Reclaim summary" of appGroup
+            else
+                key code 53
+            end if
+            delay 0.3
+        end repeat
+    end tell
+end openSummary
+
 on run argv
     set commandName to "check"
     if (count of argv) > 0 then set commandName to item 1 of argv
@@ -104,6 +120,7 @@ on run argv
             if commandName is "check" then
                 return "PASS: signed UI controls available"
             else if commandName is "guided-reclaim-visible" then
+                my openSummary(appGroup)
                 repeat with attempt from 1 to 3000
                     if exists button "Free up space" of appGroup then exit repeat
                     delay 0.1
