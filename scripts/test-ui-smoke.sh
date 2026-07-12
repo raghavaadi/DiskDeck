@@ -50,6 +50,18 @@ grep -Fq 'Searches folders and large files retained in this completed map. Small
 grep -q '^ui storage-search-visible$' "$ROOT/scripts/test-signed-ui.sh" || \
     fail "signed UI smoke must open Storage Search"
 
+grep -q 'commandName is "external-drives-visible"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must expose external-drives-visible"
+
+grep -q 'static text "External drives"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the External drives heading"
+
+grep -q 'static text "Read-only map"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the External drives safety boundary"
+
+grep -q '^ui external-drives-visible$' "$ROOT/scripts/test-signed-ui.sh" || \
+    fail "signed UI smoke must open External drives"
+
 if grep -Fq 'enabled of button "Find  ⌘F"' "$ROOT/scripts/ui-smoke.applescript"
 then
     fail "egui AccessKit omits AXEnabled; Storage Search smoke must poll for the opened heading"
@@ -70,7 +82,7 @@ grep -q '^RIGHT_CLICK_ATTEMPTS=3$' "$ROOT/scripts/test-signed-ui.sh" || \
 grep -q 'scripts/focus-window.swift' "$ROOT/scripts/test-signed-ui.sh" || \
     fail "signed UI smoke must focus the native window before AccessKit checks"
 
-if grep -Eiq 'click[^[:cntrl:]]*(Hold to reclaim|Review targets|Review this plan|Open Trash|Scan again|Scan now|Move to SSD|Reveal in Finder|Restore to Mac|Hold to restore|Start review scan|button "Refresh"|button "Watch"|button "Unwatch")' \
+if grep -Eiq 'click[^[:cntrl:]]*(Hold to reclaim|Review targets|Review this plan|Open Trash|Scan again|Scan now|Scan read-only|Stop|Refresh drives|Move to SSD|Reveal in Finder|Restore to Mac|Hold to restore|Start review scan|button "Refresh"|button "Watch"|button "Unwatch")' \
     "$ROOT/scripts/ui-smoke.applescript" "$ROOT/scripts/test-signed-ui.sh"
 then
     fail "UI smoke runner must not click a cleanup or storage action"

@@ -160,6 +160,16 @@ on run argv
                 if not (exists static text "Reclaim History" of appGroup) then error "Reclaim History heading is unavailable." number 1
                 if not (exists button "Refresh" of appGroup) then error "Reclaim History Refresh control is unavailable." number 1
                 return "PASS: Reclaim History rail available without restoring or opening Trash"
+            else if commandName is "external-drives-visible" then
+                my openInsights(appGroup)
+                if not (exists button "External drives" of appGroup) then error "External drives control is unavailable." number 1
+                click button "External drives" of appGroup
+                delay 0.5
+                if not (exists button "← Insights" of appGroup) then error "External drives rail did not open." number 1
+                if not (exists static text "External drives" of appGroup) then error "External drives heading is unavailable." number 1
+                if not (exists static text "Read-only map" of appGroup) then error "External drives read-only explanation is unavailable." number 1
+                if not (exists button "Refresh drives" of appGroup) then error "External drives Refresh control is unavailable." number 1
+                return "PASS: External drives rail available without refreshing or scanning"
             else if commandName is "moved-items-visible" then
                 my openInsights(appGroup)
                 if not (exists button "Moved items" of appGroup) then error "Moved items control is unavailable." number 1
@@ -229,7 +239,7 @@ on run argv
                 if afterSignature is beforeSignature then error "Back did not change the breadcrumb." number 1
                 return "PASS: Back navigation"
             else
-                error "Usage: ui-smoke.applescript check|storage-search-visible|guided-reclaim-visible|signature|tile-center|menu-visible|reclaim-history-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
+                error "Usage: ui-smoke.applescript check|storage-search-visible|guided-reclaim-visible|signature|tile-center|menu-visible|reclaim-history-visible|external-drives-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
             end if
         end tell
     end tell

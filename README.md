@@ -23,6 +23,12 @@ compiler proves there are no data races.
   name/path match, and on-disk size. Open a folder directly in the map, Quick
   Look a large file, or reveal either in Finder. Search is instant and local:
   it never runs a hidden second scan, and small items stay honestly grouped.
+- **Explore external drives without changing them** — open External drives
+  from Insights, inspect mounted local volumes and capacity, then start one
+  explicit read-only live map. Each drive keeps its own breadcrumbs and
+  Command-F search while open; its menu contains Open and Reveal only. Network
+  mounts are excluded, disconnects fail closed, and cleanup stays on Macintosh
+  HD.
 - **Free up a specific amount safely** — choose 10 GB, 20 GB, 50 GB, or a
   custom goal. DiskDeck builds a deterministic Safe-only plan, explains any
   shortfall, leaves Caution findings unchecked, and reports actual free space
@@ -113,6 +119,10 @@ Safety is structural, not advisory:
 - Developer Deep Dive is read-only: discovered project output can be revealed
   but never becomes a cleanup rule, command, selection, or reclaimable claim;
   only existing vetted recommendations retain their existing actions
+- External drives are a separate read-only scan context: only one external
+  tree is retained, mount path/filesystem/device identity are rechecked, and
+  external roots never enter recommendations, cleanup history, leftovers,
+  developer analysis, Move to SSD, restore, or reclaim actions
 
 ## Installation
 
@@ -211,6 +221,10 @@ point) but are never suggested for deletion.
 | click Review this plan | apply only the proposed Safe checkboxes, then inspect every target |
 | click Safe caches / Needs review | open all reclaim targets for manual review |
 | click Insights | open the bounded local-insights hub |
+| click External drives in Insights | list mounted local drives without starting a scan |
+| click Scan read-only | explicitly build one live external-drive map; no cleanup or move actions are added |
+| click Refresh drives | refresh mount/capacity metadata only; never scan files |
+| click Stop in External drives | stop the external scan and keep its partial map visibly incomplete |
 | click Reclaim History in Insights | inspect local cleanup receipts and current recovery status |
 | click Restore… in Reclaim History | review the exact original/Trash paths and repeated preflight |
 | hold Restore from Trash 0.9 s | atomically restore one acknowledged unchanged Trash receipt without overwriting |
@@ -258,6 +272,7 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 | Suite (in-module `#[cfg(test)]`) | What it proves |
 |---|---|
 | `scan.rs` | counts & aggregation, post-scan compaction folds small dirs, hardlinks counted once, denied dirs counted but non-fatal, nested `node_modules` not double-reported |
+| `volumes.rs` | mounted-local policy, network/symlink exclusion, read-only visibility, capacity math, deterministic ordering, and path/filesystem/device identity |
 | `search.rs` | completed-tree-only multi-term matching, deterministic ranking/capping, raw-path tie-breaks, denied-state retention, and fail-closed breadcrumb reconstruction |
 | `rules.rs` | KB doctrine on a synthetic tree: tiers, Trash=empty-not-trash, ≥50 MB cache floor + skip-list, Library `node_modules` excluded, safe-before-caution ordering, every rec carries explainers, `~` path prettification |
 | `clean.rs` | quick_du, write-protected delete, empty-keeps-dir, output tailing, command timeout |
@@ -270,7 +285,7 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 | `monitor.rs` | versioned settings, native AppKit status item, threshold semantics, user LaunchAgent |
 | `file_review.rs` | bounded opt-in traversal, hardlink dedup, streamed fingerprint plus byte proof, large-old metadata |
 | `transfer.rs` | shared collision, filesystem-identity, apparent-size, and verified-copy primitives |
-| `offload.rs` | protected-path policy, worker revalidation, destination collision, source identity, capacity margin, verified moves, symlink behavior, local move-record persistence, event ordering |
+| `offload.rs` | protected-path policy, writable-volume projection, worker revalidation, destination collision, source identity, capacity margin, verified moves, symlink behavior, local move-record persistence, event ordering |
 | `moves.rs` | lossless registry codec, atomic bounded storage, legacy-ledger import, health classification, restore preflight, rollback, and worker events |
 | `treemap.rs` | squarified layout conserves area, stays in bounds, degenerate inputs |
 

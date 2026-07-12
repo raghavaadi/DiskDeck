@@ -66,6 +66,14 @@ changing anything; most lines exist because something broke.
    invokes Finder, or turns a receipt path/command into cleanup authority.
    Receipt and recovery I/O stays off the egui and menu-bar loops; clean,
    offload, move-back, and Trash restore workers are mutually exclusive.
+13. **External maps never inherit cleanup authority.** `volumes.rs` may list
+   mounted local media and `scan::start_scan` may map one selected mount, but
+   that `ExternalSession` must never reach `App::on_scan_finished`, `rules`,
+   leftovers, developer analysis, scan history, reclaim, offload source,
+   restore, or clean workers. Retain at most one external tree. Revalidate the
+   exact mount path, filesystem type, and device ID before a scan and before
+   Finder/Quick Look actions. External context menus are Open + Reveal only;
+   never show Move to SSD, Trash, erase, command, restore, or reclaim.
 
 ## Build & ship
 
@@ -98,6 +106,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 | File | Role | Watch out |
 |---|---|---|
 | `scan.rs` | rayon parallel walker; `Arc<Node>` tree; **atomic size bubbling up the ancestor chain so the UI renders the tree WHILE it grows** (the headline feature) | post-scan `compact()` folds dirs <10 MB into parent aggregates; files <100 MB are never materialized as nodes |
+| `volumes.rs` | canonical mounted-local volume discovery, capacity, access state, and mount identity | accept direct real `/Volumes/*` directories only; reject symlinks, non-local/network filesystems, and the boot alias; read-only media remains explorable but not offloadable |
 | `rules.rs` | safety KB → `Vec<Rec>`; port of the proven Go doctrine | overlap control: caches with dedicated rules are in the `skip` list so generic `~/Library/Caches` enumeration doesn't double-report; recs carry data-volume paths — fs ops go through `strip_data_root` |
 | `reclaim_plan.rs` | pure Safe-only goal planner and planned-versus-actual outcome model | accepts existing recommendations only; never creates paths, actions, commands, or filesystem work; estimated and pending Trash bytes stay distinct from actual free space |
 | `clean.rs` | trash/delete/empty/command executors + background orchestrator (mpsc events) | **trash = `os::rename` into `~/.Trash` FIRST** — Finder-osascript hangs silently without the Automation TCC grant and is fallback only; `delete_path` chmods-and-retries for write-protected trees (go-modcache style) |
@@ -150,6 +159,12 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
   Display matching may be lossy, but Open/Quick Look/Reveal must carry the
   original `PathBuf`. `begin_scan` must discard every retained search node
   before replacing the root.
+- **External scans are isolated map sessions:** only the External drives rail
+  may start them, and only after the internal scan and mutation/file-review
+  workers are idle. A disconnect or device replacement cancels the scan,
+  invalidates source search, and disables path actions. Never “reuse” the
+  internal `scan/view/crumbs/zoom` fields for an external root or build Recs
+  from an external completion.
 
 ## The most common task: adding a cleanup rule
 
@@ -179,6 +194,12 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
   and restore the prior receipt file byte-for-byte afterward. Storage Search
   smoke may open and close the empty surface but must never type a query, press
   Enter, or activate Open map, Quick Look, or Reveal.
+  External-drive visual QA must use only a temporary APFS image named
+  `DiskDeck-QA-External-Volume`, record its exact device, and detach/delete that
+  exact fixture afterward. Never scan or mutate the owner's real external
+  drives. Signed smoke may navigate into External drives and back, but must not
+  click Refresh drives, Scan read-only, Stop, Finder, Quick Look, move,
+  cleanup, or restore.
 
 ## Public repository and commit hygiene
 
@@ -199,7 +220,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 
 ## Repo conventions
 
-- Flat module layout (`scan/search/rules/reclaim_plan/clean/reclaim_history/history/forecast/transfer/offload/moves/developer/apfs/leftovers/monitor/file_review/treemap/theme/app`), one concern per
+- Flat module layout (`scan/volumes/search/rules/reclaim_plan/clean/reclaim_history/history/forecast/transfer/offload/moves/developer/apfs/leftovers/monitor/file_review/treemap/theme/app`), one concern per
   file. No new crate dependencies without strong reason.
 - The direct `objc2` / `objc2-app-kit` / `objc2-foundation` declarations are
   the narrow exception for the native `NSStatusItem`; eframe already ships the
