@@ -34,6 +34,13 @@ compiler proves there are no data races.
   Command-F search while open; its menu contains Open and Reveal only. Network
   mounts are excluded, disconnects fail closed, and cleanup stays on Macintosh
   HD.
+- **Answer one folder question quickly** — open Folder Lens from Insights,
+  choose one local folder or drop it from Finder, and watch an isolated
+  read-only map grow without rescanning the whole disk. The focused map has
+  its own breadcrumbs and Command-F search, reports the containing volume's
+  capacity separately from mapped folder bytes, and offers only Open, Reveal,
+  and Quick Look. Whole-volume, network, missing, and symlinked targets fail
+  closed.
 - **Free up a specific amount safely** — choose 10 GB, 20 GB, 50 GB, or a
   custom goal. DiskDeck builds a deterministic Safe-only plan, explains any
   shortfall, leaves Caution findings unchecked, and reports actual free space
@@ -128,6 +135,10 @@ Safety is structural, not advisory:
   tree is retained, mount path/filesystem/device identity are rechecked, and
   external roots never enter recommendations, cleanup history, leftovers,
   developer analysis, Move to SSD, restore, or reclaim actions
+- Folder Lens is another isolated read-only context: a user-chosen path is
+  accepted only as one direct local folder, filesystem/device/inode identity
+  is rechecked before Finder or Quick Look, and its tree never enters cleanup,
+  recommendations, history, analysis, offload, restore, or reclaim code
 
 ## Installation
 
@@ -233,6 +244,9 @@ point) but are never suggested for deletion.
 | click Scan read-only | explicitly build one live external-drive map; no cleanup or move actions are added |
 | click Refresh drives | refresh mount/capacity metadata only; never scan files |
 | click Stop in External drives | stop the external scan and keep its partial map visibly incomplete |
+| click Folder Lens in Insights | open the focused local-folder workspace without starting a scan |
+| click Choose a folder… / drop one Finder folder | explicitly build one isolated read-only folder map |
+| click Stop scan in Folder Lens | stop the focused scan and keep its partial map visibly incomplete |
 | click Reclaim History in Insights | inspect local cleanup receipts and current recovery status |
 | click Restore… in Reclaim History | review the exact original/Trash paths and repeated preflight |
 | hold Restore from Trash 0.9 s | atomically restore one acknowledged unchanged Trash receipt without overwriting |
@@ -281,6 +295,7 @@ most notably the font-fallback/tofu lesson and why the icon has no track arc.
 |---|---|
 | `scan.rs` | counts & aggregation, post-scan compaction folds small dirs, hardlinks counted once, denied dirs counted but non-fatal, nested `node_modules` not double-reported |
 | `volumes.rs` | mounted-local policy, network/symlink exclusion, read-only visibility, capacity math, deterministic ordering, and path/filesystem/device identity |
+| `folder_lens.rs` | direct-folder policy, local-filesystem boundary, symlink-ancestor refusal, identity revalidation, and lossless picker output parsing |
 | `search.rs` | completed-tree-only multi-term matching, deterministic ranking/capping, raw-path tie-breaks, denied-state retention, and fail-closed breadcrumb reconstruction |
 | `rules.rs` | KB doctrine on a synthetic tree: tiers, Trash=empty-not-trash, ≥50 MB cache floor + skip-list, Library `node_modules` excluded, safe-before-caution ordering, every rec carries explainers, `~` path prettification |
 | `clean.rs` | quick_du, write-protected delete, empty-keeps-dir, output tailing, command timeout |
@@ -330,6 +345,8 @@ app leftovers, the opt-in menu-bar monitor, and read-only duplicate/large-old
 review. Reclaim History later completed the default-to-Trash promise with
 durable local receipts and verified exact-item recovery. Storage Search then
 made the retained map directly searchable without adding another disk walk.
+Folder Lens added an explicit choose-or-drop path for a focused read-only map
+while keeping user-selected paths permanently outside cleanup authority.
 
 Fonts: Inter (SIL OFL, see `assets/fonts/LICENSE.txt`) for the native-width UI;
 paths and scan data use egui's built-in Hack.

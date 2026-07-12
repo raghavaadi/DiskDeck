@@ -185,6 +185,17 @@ on run argv
                 if not (exists static text "Read-only map" of appGroup) then error "External drives read-only explanation is unavailable." number 1
                 if not (exists button "Refresh drives" of appGroup) then error "External drives Refresh control is unavailable." number 1
                 return "PASS: External drives rail available without refreshing or scanning"
+            else if commandName is "folder-lens-visible" then
+                my openInsights(appGroup)
+                if not (exists button "Folder Lens" of appGroup) then error "Folder Lens control is unavailable." number 1
+                click button "Folder Lens" of appGroup
+                delay 0.5
+                if not (exists button "← Insights" of appGroup) then error "Folder Lens rail did not open." number 1
+                if not (exists static text "Folder Lens" of appGroup) then error "Folder Lens heading is unavailable." number 1
+                if not (exists button "Choose a folder…" of appGroup) then error "Folder chooser control is unavailable." number 1
+                if not (exists static text "Drop one Finder folder here" of appGroup) then error "Folder drop zone is unavailable." number 1
+                if not (exists static text "Folder Lens can inspect, open, reveal, and search. It cannot reclaim or move anything." of appGroup) then error "Folder Lens capability boundary is unavailable." number 1
+                return "PASS: Folder Lens available without choosing or scanning a folder"
             else if commandName is "moved-items-visible" then
                 my openInsights(appGroup)
                 if not (exists button "Moved items" of appGroup) then error "Moved items control is unavailable." number 1
@@ -254,7 +265,7 @@ on run argv
                 if afterSignature is beforeSignature then error "Back did not change the breadcrumb." number 1
                 return "PASS: Back navigation"
             else
-                error "Usage: ui-smoke.applescript check|storage-search-visible|safety-guide-visible|guided-reclaim-visible|signature|tile-center|menu-visible|reclaim-history-visible|external-drives-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
+                error "Usage: ui-smoke.applescript check|storage-search-visible|safety-guide-visible|guided-reclaim-visible|signature|tile-center|menu-visible|reclaim-history-visible|external-drives-visible|folder-lens-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
             end if
         end tell
     end tell

@@ -79,6 +79,21 @@ grep -q 'static text "Read-only map"' "$ROOT/scripts/ui-smoke.applescript" || \
 grep -q '^ui external-drives-visible$' "$ROOT/scripts/test-signed-ui.sh" || \
     fail "signed UI smoke must open External drives"
 
+grep -q 'commandName is "folder-lens-visible"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must expose folder-lens-visible"
+
+grep -Fq 'button "Choose a folder…"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the Folder Lens chooser"
+
+grep -Fq 'static text "Drop one Finder folder here"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify drag-and-drop discoverability"
+
+grep -Fq 'It cannot reclaim or move anything.' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify Folder Lens capability copy"
+
+grep -q '^ui folder-lens-visible$' "$ROOT/scripts/test-signed-ui.sh" || \
+    fail "signed UI smoke must open Folder Lens"
+
 if grep -Fq 'enabled of button "Find  ⌘F"' "$ROOT/scripts/ui-smoke.applescript"
 then
     fail "egui AccessKit omits AXEnabled; Storage Search smoke must poll for the opened heading"
@@ -103,7 +118,7 @@ grep -q '^RIGHT_CLICK_ATTEMPTS=3$' "$ROOT/scripts/test-signed-ui.sh" || \
 grep -q 'scripts/focus-window.swift' "$ROOT/scripts/test-signed-ui.sh" || \
     fail "signed UI smoke must focus the native window before AccessKit checks"
 
-if grep -Eiq 'click[^[:cntrl:]]*(Hold to reclaim|Review targets|Review this plan|Open Trash|Scan again|Scan now|Scan read-only|Stop|Refresh drives|Move to SSD|Reveal in Finder|Restore to Mac|Hold to restore|Start review scan|button "Refresh"|button "Watch"|button "Unwatch")' \
+if grep -Eiq 'click[^[:cntrl:]]*(Hold to reclaim|Review targets|Review this plan|Open Trash|Scan again|Scan now|Scan read-only|Stop|Refresh drives|Choose a folder|Move to SSD|Reveal in Finder|Restore to Mac|Hold to restore|Start review scan|button "Refresh"|button "Watch"|button "Unwatch")' \
     "$ROOT/scripts/ui-smoke.applescript" "$ROOT/scripts/test-signed-ui.sh"
 then
     fail "UI smoke runner must not click a cleanup or storage action"

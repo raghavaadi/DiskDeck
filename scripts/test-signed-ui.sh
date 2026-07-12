@@ -7,7 +7,7 @@ APP_EXECUTABLE="$APP/Contents/MacOS/diskdeck"
 APPLESCRIPT="$ROOT/scripts/ui-smoke.applescript"
 # Safety contract consumed by test-ui-smoke.sh. Navigation may never activate
 # any control containing these mutation/Finder labels.
-FORBIDDEN_ACTION_LABELS='Restore Reveal Open Trash Hold to restore Refresh drives Scan read-only Stop'
+FORBIDDEN_ACTION_LABELS='Restore Reveal Open Trash Hold to restore Refresh drives Scan read-only Stop Choose a folder'
 
 fail() {
     echo "FAIL: $*" >&2
@@ -67,6 +67,8 @@ ui back
 ui reclaim-history-visible
 ui escape
 ui external-drives-visible
+ui escape
+ui folder-lens-visible
 ui escape
 ui moved-items-visible
 ui escape

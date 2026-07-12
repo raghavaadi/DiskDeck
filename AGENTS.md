@@ -74,6 +74,15 @@ changing anything; most lines exist because something broke.
    exact mount path, filesystem type, and device ID before a scan and before
    Finder/Quick Look actions. External context menus are Open + Reveal only;
    never show Move to SSD, Trash, erase, command, restore, or reclaim.
+14. **Folder Lens never inherits cleanup authority.** `folder_lens.rs` may
+   validate one explicit local folder and `scan::start_scan` may map it, but a
+   `FolderSession` must never reach `App::on_scan_finished`, `rules`, history,
+   Growth Watch, forecast, leftovers, developer analysis, file review,
+   reclaim, offload, restore, or clean workers. Reject whole-volume, network,
+   missing, file, and any exact/ancestor-symlink target. Recheck exact path,
+   filesystem, device, and inode before Finder/Quick Look. Folder context
+   menus are Open + Reveal only; the fixed AppleScript picker must never
+   accept script or command text from UI input.
 
 ## Build & ship
 
@@ -116,6 +125,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 | `leftovers.rs` | read-only large sandbox absence proof | exact bundle-ID-shaped `Library/Containers` entries only; lookup failure means omit; findings stay Caution/reveal-only |
 | `monitor.rs` | opt-in native menu-bar free-space readout and user login setting | defaults off; five-minute `statfs` updates only; login LaunchAgent is a separate explicit choice; never start a scan/helper |
 | `file_review.rs` | opt-in duplicate and large-old user-file review | never auto-start; standard user roots only; byte-compare before calling duplicates exact; hardlinks dedup; reveal/Quick Look only |
+| `folder_lens.rs` | focused local-folder target policy and fixed native chooser | preserve raw picker path bytes; reject whole volumes, network/synthetic filesystems, and symlink ancestors; identity mismatch disables every path action |
 | `history.rs` | compact completed-scan snapshots, backward-compatible capacity evidence, previous-scan comparison, Growth Watch timeline/watchlist, atomic retention worker | write DDHIST2 and read DDHIST1/DDHIST2; raw path bytes must round-trip; corrupt snapshots are skipped; corrupt watchlists are never overwritten; no always-on scan is started |
 | `forecast.rs` | pure compatible-capacity filter and robust local time-to-low model | require 3 scans/7 days before estimating; flat, improving, volatile, invalid, sparse, and incompatible evidence must not become false precision |
 | `transfer.rs` | shared path-identity, collision, apparent-size, and verified-ditto primitives | copy helpers never remove either side; callers own the final identity recheck and deletion order |
@@ -165,6 +175,11 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
   invalidates source search, and disables path actions. Never “reuse” the
   internal `scan/view/crumbs/zoom` fields for an external root or build Recs
   from an external completion.
+- **Folder Lens is an isolated map session:** chooser and Finder drop are
+  explicit user actions, only one auxiliary (External or Folder) tree may be
+  active, and a completed auxiliary tree is discarded when the other starts.
+  Never “helpfully” canonicalize a symlinked selection into authority, expose
+  the chooser to signed smoke, or let folder completion build recommendations.
 
 ## The most common task: adding a cleanup rule
 
@@ -200,6 +215,11 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
   drives. Signed smoke may navigate into External drives and back, but must not
   click Refresh drives, Scan read-only, Stop, Finder, Quick Look, move,
   cleanup, or restore.
+  Folder Lens visual QA must use only a disposable direct-path fixture with
+  large enough children to survive map compaction, then remove that exact
+  fixture. Signed smoke may open Folder Lens and verify copy, but must never
+  click Choose a folder, drop a path, start/stop a scan, or invoke Finder or
+  Quick Look.
 
 ## Public repository and commit hygiene
 
