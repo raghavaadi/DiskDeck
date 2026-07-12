@@ -141,7 +141,7 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
 | `monitor.rs` | opt-in native menu-bar free-space readout and user login setting | defaults off; five-minute `statfs` updates only; login LaunchAgent is a separate explicit choice; never start a scan/helper |
 | `file_review.rs` | opt-in duplicate and large-old user-file review | never auto-start; standard user roots only; byte-compare before calling duplicates exact; hardlinks dedup; reveal/Quick Look only |
 | `folder_lens.rs` | focused local-folder target policy and fixed native chooser | preserve raw picker path bytes; reject whole volumes, network/synthetic filesystems, and symlink ancestors; identity mismatch disables every path action |
-| `search.rs` | pure projections over retained compact map nodes for Storage Search and Largest files | internal map only; preserve raw `PathBuf` actions, deterministic raw-path tie breaks, and honest 10 MB folder / 100 MB file coverage floors |
+| `search.rs` | pure projections over retained compact map nodes for Storage Search, Largest files, and Scan coverage | internal map only; preserve raw `PathBuf` actions, deterministic raw-path tie breaks, and honest size/access coverage boundaries |
 | `history.rs` | compact completed-scan snapshots, backward-compatible capacity evidence, previous-scan comparison, Growth Watch timeline/watchlist, atomic retention worker | write DDHIST2 and read DDHIST1/DDHIST2; raw path bytes must round-trip; corrupt snapshots are skipped; corrupt watchlists are never overwritten; no always-on scan is started |
 | `forecast.rs` | pure compatible-capacity filter and robust local time-to-low model | require 3 scans/7 days before estimating; flat, improving, volatile, invalid, sparse, and incompatible evidence must not become false precision |
 | `transfer.rs` | shared path-identity, collision, apparent-size, and verified-ditto primitives | copy helpers never remove either side; callers own the final identity recheck and deletion order |
@@ -192,6 +192,13 @@ cargo run        # dev run only — unbundled binary has its own TCC identity,
   traverse the filesystem, create a recommendation, or add cleanup/offload
   authority. Files below 100 MB stay grouped and that limit must remain visible.
   `begin_scan` must discard the cached projection before replacing the root.
+- **Scan coverage explains retained denial evidence only:** derive it from
+  denied directory nodes in an exactly completed internal compact tree. Never
+  add a second path channel, traversal, external/Folder Lens evidence,
+  persistence, upload, Finder action, or cleanup/offload authority. `Users/<account>`
+  except `Users/Shared` is Personal; everything else is System—an explanation
+  category, never a promise about macOS internals. Display at most 60 paths,
+  preserve raw-path ordering, and clear the projection in `begin_scan`.
 - **External scans are isolated map sessions:** only the External drives rail
   may start them, and only after the internal scan and mutation/file-review
   workers are idle. A disconnect or device replacement cancels the scan,

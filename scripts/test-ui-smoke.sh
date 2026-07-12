@@ -84,6 +84,27 @@ grep -Fq 'Largest files answers the biggest-file question from the completed map
 grep -q '^ui largest-files-visible$' "$ROOT/scripts/test-signed-ui.sh" || \
     fail "signed UI smoke must open Largest files"
 
+grep -q 'commandName is "scan-coverage-visible"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must expose scan-coverage-visible"
+
+grep -q 'static text "Scan coverage"' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the Scan coverage heading"
+
+grep -Fq 'static text "LOCAL COVERAGE · COMPLETED MAP"' \
+    "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the completed-map coverage boundary"
+
+grep -Fq 'static text "Local only · paths are not saved · no reveal, clean, or move actions"' \
+    "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "UI smoke runner must verify the Scan coverage privacy boundary"
+
+grep -Fq 'Scan coverage explains what the completed map could not read without starting another scan.' \
+    "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "Safety guide smoke must explain the Scan coverage workflow"
+
+grep -q '^ui scan-coverage-visible$' "$ROOT/scripts/test-signed-ui.sh" || \
+    fail "signed UI smoke must open Scan coverage"
+
 grep -q 'commandName is "external-drives-visible"' "$ROOT/scripts/ui-smoke.applescript" || \
     fail "UI smoke runner must expose external-drives-visible"
 
@@ -116,7 +137,7 @@ then
     fail "egui AccessKit omits AXEnabled; Storage Search smoke must poll for the opened heading"
 fi
 
-for forbidden in 'Restore' 'Reveal' 'Open Trash' 'Hold to restore'
+for forbidden in 'Restore' 'Reveal' 'Open Trash' 'Hold to restore' 'Open Full Disk Access'
 do
     grep -Fq "$forbidden" "$ROOT/scripts/test-signed-ui.sh" || \
         fail "signed UI smoke safety contract is missing forbidden label: $forbidden"
@@ -135,7 +156,16 @@ grep -q '^RIGHT_CLICK_ATTEMPTS=3$' "$ROOT/scripts/test-signed-ui.sh" || \
 grep -q 'scripts/focus-window.swift' "$ROOT/scripts/test-signed-ui.sh" || \
     fail "signed UI smoke must focus the native window before AccessKit checks"
 
-if grep -Eiq 'click[^[:cntrl:]]*(Hold to reclaim|Review targets|Review this plan|Open Trash|Scan again|Scan now|Scan read-only|Stop|Refresh drives|Choose a folder|Move to SSD|Reveal in Finder|Restore to Mac|Hold to restore|Start review scan|button "Refresh"|button "Watch"|button "Unwatch")' \
+awk '
+    /else if commandName is "escape"/ { in_escape = 1 }
+    in_escape && /repeat 3 times/ { retried = 1 }
+    in_escape && /delay 0.3/ { settled = 1 }
+    in_escape && /return "PASS: Escape sent"/ { exit (settled && retried) ? 0 : 1 }
+    END { if (!settled || !retried) exit 1 }
+' "$ROOT/scripts/ui-smoke.applescript" || \
+    fail "Escape smoke must retry until egui publishes rail navigation"
+
+if grep -Eiq 'click[^[:cntrl:]]*(Hold to reclaim|Review targets|Review this plan|Open Trash|Open Full Disk Access|Scan again|Scan now|Scan read-only|Stop|Refresh drives|Choose a folder|Move to SSD|Reveal in Finder|Restore to Mac|Hold to restore|Start review scan|button "Refresh"|button "Watch"|button "Unwatch")' \
     "$ROOT/scripts/ui-smoke.applescript" "$ROOT/scripts/test-signed-ui.sh"
 then
     fail "UI smoke runner must not click a cleanup or storage action"

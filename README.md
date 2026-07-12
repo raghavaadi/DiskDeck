@@ -33,6 +33,11 @@ compiler proves there are no data races.
   second scan and offers only Quick Look and Reveal in Finder. DiskDeck states
   the coverage boundary in the view: retained files are 100 MB and larger;
   smaller files remain grouped in the map.
+- **Understand scan coverage** — open Scan coverage from Insights to separate
+  unavailable personal-folder paths, where Full Disk Access may help, from
+  macOS/system paths that often remain protected normally. The report is built
+  from the completed map, keeps at most 60 rows on screen, never starts another
+  scan, and never saves or uploads a path.
 - **Explore external drives without changing them** — open External drives
   from Insights, inspect mounted local volumes and capacity, then start one
   explicit read-only live map. Each drive keeps its own breadcrumbs and
@@ -203,7 +208,8 @@ personal folders — granting it drops the count by a couple hundred. The
 remainder are **root-only system directories** (Spotlight index, filesystem
 journal `.fseventsd`, root's home, audit logs). No app you run can read those,
 by design, and there's nothing reclaimable inside. Hover the NO ACCESS counter
-in-app for this same explanation.
+in-app for this same explanation, or open **Insights → Scan coverage** for the
+bounded local breakdown. Scan coverage has no reveal, cleanup, or move action.
 
 **I reclaimed items but free space didn't move.**
 Trash items don't free space until the Trash is emptied — that's what makes
@@ -252,6 +258,8 @@ point) but are never suggested for deletion.
 | click Guide | open the persistent read-only Safety & Quick Start flight plan |
 | click Insights | open the bounded local-insights hub |
 | click Safety & Quick Start in Insights | learn the everyday and developer paths without starting storage work |
+| click Scan coverage in Insights | explain unavailable personal and system locations from the completed map |
+| click Open Full Disk Access in Scan coverage | open macOS Settings only; grant access manually, then rescan |
 | click Explore the map in the guide | return to the reclaim summary and visible map |
 | click External drives in Insights | list mounted local drives without starting a scan |
 | click Scan read-only | explicitly build one live external-drive map; no cleanup or move actions are added |

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 pub const DEFAULT_RESULT_LIMIT: usize = 80;
 pub const DEFAULT_LARGEST_FILE_LIMIT: usize = 80;
+pub const DEFAULT_COVERAGE_LIMIT: usize = 60;
 
 #[derive(Clone)]
 pub struct SearchResult {
@@ -29,6 +30,26 @@ pub struct LargestFile {
 pub struct LargestFilesSummary {
     pub total_files: usize,
     pub results: Vec<LargestFile>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CoverageKind {
+    Personal,
+    System,
+}
+
+pub struct DeniedLocation {
+    pub path: std::path::PathBuf,
+    pub display_path: String,
+    pub kind: CoverageKind,
+}
+
+#[derive(Default)]
+pub struct ScanCoverageSummary {
+    pub total_denied: usize,
+    pub personal_denied: usize,
+    pub system_denied: usize,
+    pub results: Vec<DeniedLocation>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -127,6 +148,64 @@ pub fn largest_files(root: &Arc<Node>, limit: usize) -> LargestFilesSummary {
     LargestFilesSummary {
         total_files,
         results: files,
+    }
+}
+
+fn coverage_kind(root: &std::path::Path, path: &std::path::Path) -> CoverageKind {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return CoverageKind::System;
+    };
+    let mut components = relative.components();
+    let users = components.next().map(|part| part.as_os_str());
+    let account = components.next().map(|part| part.as_os_str());
+    if users == Some(std::ffi::OsStr::new("Users"))
+        && account.is_some()
+        && account != Some(std::ffi::OsStr::new("Shared"))
+    {
+        CoverageKind::Personal
+    } else {
+        CoverageKind::System
+    }
+}
+
+pub fn scan_coverage(root: &Arc<Node>, limit: usize) -> ScanCoverageSummary {
+    let mut denied = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(node) = stack.pop() {
+        if !node.is_dir {
+            continue;
+        }
+        stack.extend(node.kids());
+        if node.denied.load(std::sync::atomic::Ordering::Relaxed) {
+            let kind = coverage_kind(&root.path, &node.path);
+            denied.push(DeniedLocation {
+                path: node.path.clone(),
+                display_path: node.path.to_string_lossy().into_owned(),
+                kind,
+            });
+        }
+    }
+
+    denied.sort_by(|left, right| {
+        left.kind.cmp(&right.kind).then_with(|| {
+            left.path
+                .as_os_str()
+                .as_bytes()
+                .cmp(right.path.as_os_str().as_bytes())
+        })
+    });
+    let personal_denied = denied
+        .iter()
+        .filter(|location| location.kind == CoverageKind::Personal)
+        .count();
+    let system_denied = denied.len().saturating_sub(personal_denied);
+    let total_denied = denied.len();
+    denied.truncate(limit.min(DEFAULT_COVERAGE_LIMIT));
+    ScanCoverageSummary {
+        total_denied,
+        personal_denied,
+        system_denied,
+        results: denied,
     }
 }
 
@@ -366,6 +445,49 @@ mod tests {
 
         let empty = largest_files(&root("/empty"), DEFAULT_LARGEST_FILE_LIMIT);
         assert_eq!(empty.total_files, 0);
+        assert!(empty.results.is_empty());
+    }
+
+    #[test]
+    fn scan_coverage_classifies_personal_paths_and_orders_raw_paths() {
+        let fixture = fixture();
+        let alice = child(&fixture.users, "alice", true, 1, false);
+        let personal_z = child(&alice, "Documents", true, 0, true);
+        let personal_a = child(&alice, "Desktop", true, 0, true);
+        let shared = child(&fixture.users, "Shared", true, 0, true);
+        let system = child(&fixture.root, ".Spotlight-V100", true, 0, true);
+        let _readable = child(&fixture.root, "Library", true, 1, false);
+        let _denied_file = child(&fixture.root, "locked.bin", false, 200_000_000, true);
+
+        let summary = scan_coverage(&fixture.root, DEFAULT_COVERAGE_LIMIT);
+
+        assert_eq!(summary.total_denied, 4);
+        assert_eq!(summary.personal_denied, 2);
+        assert_eq!(summary.system_denied, 2);
+        assert_eq!(summary.results.len(), 4);
+        assert_eq!(summary.results[0].kind, CoverageKind::Personal);
+        assert_eq!(summary.results[0].path, personal_a.path);
+        assert_eq!(summary.results[1].path, personal_z.path);
+        assert_eq!(summary.results[2].kind, CoverageKind::System);
+        assert_eq!(summary.results[2].path, system.path);
+        assert_eq!(summary.results[3].path, shared.path);
+        assert!(summary.results[0].display_path.ends_with("Desktop"));
+    }
+
+    #[test]
+    fn scan_coverage_caps_rows_reports_every_denial_and_handles_empty_maps() {
+        let fixture = fixture();
+        for index in 0..(DEFAULT_COVERAGE_LIMIT + 2) {
+            child(&fixture.root, &format!("locked-{index:03}"), true, 0, true);
+        }
+
+        let capped = scan_coverage(&fixture.root, DEFAULT_COVERAGE_LIMIT + 20);
+        assert_eq!(capped.total_denied, DEFAULT_COVERAGE_LIMIT + 2);
+        assert_eq!(capped.system_denied, DEFAULT_COVERAGE_LIMIT + 2);
+        assert_eq!(capped.results.len(), DEFAULT_COVERAGE_LIMIT);
+
+        let empty = scan_coverage(&root("/empty"), DEFAULT_COVERAGE_LIMIT);
+        assert_eq!(empty.total_denied, 0);
         assert!(empty.results.is_empty());
     }
 }

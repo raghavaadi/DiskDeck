@@ -140,6 +140,16 @@ on run argv
                 if not (exists static text "RETAINED MAP · FILES ≥ 100 MB" of appGroup) then error "Largest files coverage boundary is unavailable." number 1
                 if not (exists static text "Read-only · completed Macintosh HD map · files below 100 MB stay grouped" of appGroup) then error "Largest files read-only boundary is unavailable." number 1
                 return "PASS: Largest files available without starting a scan or activating a file action"
+            else if commandName is "scan-coverage-visible" then
+                my openInsights(appGroup)
+                if not (exists button "Scan coverage" of appGroup) then error "Scan coverage control is unavailable." number 1
+                click button "Scan coverage" of appGroup
+                delay 0.5
+                if not (exists button "← Insights" of appGroup) then error "Scan coverage rail did not open." number 1
+                if not (exists static text "Scan coverage" of appGroup) then error "Scan coverage heading is unavailable." number 1
+                if not (exists static text "LOCAL COVERAGE · COMPLETED MAP" of appGroup) then error "Scan coverage source boundary is unavailable." number 1
+                if not (exists static text "Local only · paths are not saved · no reveal, clean, or move actions" of appGroup) then error "Scan coverage privacy boundary is unavailable." number 1
+                return "PASS: Scan coverage available without opening Settings or activating a path action"
             else if commandName is "safety-guide-visible" then
                 my openSummary(appGroup)
                 if not (exists button "Guide" of appGroup) then error "Guide entry point is unavailable." number 1
@@ -149,6 +159,7 @@ on run argv
                 if not (exists static text "Safety & Quick Start" of appGroup) then error "Safety guide heading is unavailable." number 1
                 if not (exists static text "SCAN · EXPLORE · REVIEW · HOLD" of appGroup) then error "Safe workflow explanation is unavailable." number 1
                 if not (exists static text "Largest files answers the biggest-file question from the completed map without another scan." of appGroup) then error "Largest files guide explanation is unavailable." number 1
+                if not (exists static text "Scan coverage explains what the completed map could not read without starting another scan." of appGroup) then error "Scan coverage guide explanation is unavailable." number 1
                 click button "← Insights" of appGroup
                 delay 0.5
                 if not (exists button "Safety & Quick Start" of appGroup) then error "Insights guide entry point is unavailable." number 1
@@ -265,7 +276,22 @@ on run argv
                 if not (exists button "Start review scan" of appGroup) then error "Opt-in review control is unavailable." number 1
                 return "PASS: File review rail available without starting"
             else if commandName is "escape" then
-                key code 53
+                set hadInsightsBack to exists button "← Insights" of appGroup
+                set hadReclaimBack to exists button "← Reclaim summary" of appGroup
+                set hadSearch to exists static text "Storage Search" of appGroup
+                repeat 3 times
+                    key code 53
+                    delay 0.3
+                    if hadInsightsBack then
+                        if not (exists button "← Insights" of appGroup) then exit repeat
+                    else if hadReclaimBack then
+                        if not (exists button "← Reclaim summary" of appGroup) then exit repeat
+                    else if hadSearch then
+                        if not (exists static text "Storage Search" of appGroup) then exit repeat
+                    else
+                        exit repeat
+                    end if
+                end repeat
                 return "PASS: Escape sent"
             else if commandName is "back" then
                 set beforeSignature to my breadcrumbSignature(appGroup)
@@ -276,7 +302,7 @@ on run argv
                 if afterSignature is beforeSignature then error "Back did not change the breadcrumb." number 1
                 return "PASS: Back navigation"
             else
-                error "Usage: ui-smoke.applescript check|storage-search-visible|largest-files-visible|safety-guide-visible|guided-reclaim-visible|signature|tile-center|menu-visible|reclaim-history-visible|external-drives-visible|folder-lens-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
+                error "Usage: ui-smoke.applescript check|storage-search-visible|largest-files-visible|scan-coverage-visible|safety-guide-visible|guided-reclaim-visible|signature|tile-center|menu-visible|reclaim-history-visible|external-drives-visible|folder-lens-visible|moved-items-visible|growth-watch-visible|developer-lens-visible|apfs-accounting-visible|app-leftovers-visible|menu-monitor-visible|file-review-visible|escape|back" number 1
             end if
         end tell
     end tell
