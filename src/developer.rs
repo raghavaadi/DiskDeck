@@ -1,7 +1,9 @@
 //! Deterministic, local-only grouping for the opt-in Developer Lens.
 
 use crate::rules::{Rec, Tier};
+use crate::scan::Node;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DeveloperSection {
@@ -55,6 +57,7 @@ pub struct DeepFinding {
     pub bytes: i64,
     pub rebuild_cost: RebuildCost,
     pub counted: bool,
+    pub project_root: Option<PathBuf>,
     pub evidence: Evidence,
 }
 
@@ -147,9 +150,8 @@ fn section_order() -> [DeveloperSection; 6] {
     ]
 }
 
-pub fn build_report(recs: &[Rec], mut docker: DockerBreakdown) -> DeveloperReport {
-    let mut candidates: Vec<(DeveloperSection, DeepFinding)> = recs
-        .iter()
+fn candidates_from_recs(recs: &[Rec]) -> Vec<(DeveloperSection, DeepFinding)> {
+    recs.iter()
         .filter(|rec| rec.bytes > 0)
         .filter_map(|rec| {
             let section = deep_section(&rec.id)?;
@@ -160,6 +162,11 @@ pub fn build_report(recs: &[Rec], mut docker: DockerBreakdown) -> DeveloperRepor
                     bytes: rec.bytes,
                     rebuild_cost: rebuild_cost(&rec.id),
                     counted: true,
+                    project_root: if section == DeveloperSection::Projects {
+                        rec.path.parent().map(PathBuf::from)
+                    } else {
+                        None
+                    },
                     evidence: Evidence {
                         source_rec_id: Some(rec.id.clone()),
                         measured_path: rec.path.clone(),
@@ -174,14 +181,25 @@ pub fn build_report(recs: &[Rec], mut docker: DockerBreakdown) -> DeveloperRepor
                 },
             ))
         })
-        .collect();
+        .collect()
+}
 
+fn assemble_report(
+    mut candidates: Vec<(DeveloperSection, DeepFinding)>,
+    mut docker: DockerBreakdown,
+) -> DeveloperReport {
     candidates.sort_by(|(left_section, left), (right_section, right)| {
         left.evidence
             .measured_path
             .components()
             .count()
             .cmp(&right.evidence.measured_path.components().count())
+            .then_with(|| {
+                left.evidence
+                    .source_rec_id
+                    .is_none()
+                    .cmp(&right.evidence.source_rec_id.is_none())
+            })
             .then_with(|| left_section.cmp(right_section))
             .then_with(|| {
                 left.evidence
@@ -253,6 +271,244 @@ pub fn build_report(recs: &[Rec], mut docker: DockerBreakdown) -> DeveloperRepor
         sections,
         docker,
     }
+}
+
+pub fn build_report(recs: &[Rec], docker: DockerBreakdown) -> DeveloperReport {
+    assemble_report(candidates_from_recs(recs), docker)
+}
+
+const PROJECT_MIN_BYTES: i64 = 20_000_000;
+const PROJECT_CANDIDATE_CAP: usize = 200;
+
+fn is_project_candidate(path: &std::path::Path, home: &std::path::Path, name: &str) -> bool {
+    if !path.starts_with(home) || !matches!(name, "target" | ".venv" | "venv" | "build" | "dist") {
+        return false;
+    }
+    let Ok(relative) = path.strip_prefix(home) else {
+        return false;
+    };
+    let components: Vec<String> = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    for (index, component) in components.iter().enumerate() {
+        let last = index + 1 == components.len();
+        if component == "Library"
+            || matches!(component.as_str(), "CloudStorage" | "Mobile Documents")
+            || component.ends_with(".app")
+            || component.ends_with(".photoslibrary")
+            || component.ends_with(".musiclibrary")
+            || (component.starts_with('.') && !(last && component == ".venv"))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn project_markers(name: &str) -> &'static [&'static str] {
+    match name {
+        "target" => &["Cargo.toml"],
+        ".venv" | "venv" => &["pyproject.toml", "requirements.txt", "Pipfile"],
+        "build" | "dist" => &[
+            "package.json",
+            "Cargo.toml",
+            "pyproject.toml",
+            "requirements.txt",
+            "Pipfile",
+        ],
+        _ => &[],
+    }
+}
+
+fn inventory_finding(
+    node: &Arc<Node>,
+    project_root: Option<PathBuf>,
+    marker: Option<&str>,
+) -> DeepFinding {
+    let name = node.name.as_str();
+    let owned = project_root.is_some();
+    let project_name = project_root
+        .as_deref()
+        .and_then(std::path::Path::file_name)
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unowned project".into());
+    let rebuild_cost = if !owned {
+        RebuildCost::ManualSetup
+    } else if matches!(name, ".venv" | "venv") {
+        RebuildCost::LargeDownload
+    } else {
+        RebuildCost::QuickRegeneration
+    };
+    let title = if owned {
+        format!("{name} — {project_name}")
+    } else {
+        format!("{name} — ungrouped output")
+    };
+    let explanation = marker.map_or_else(
+        || {
+            "Measured in the retained scan, but no nearby standard project marker proves ownership. Reveal-only; never a cleanup rule."
+                .into()
+        },
+        |marker| {
+            format!(
+                "Measured in the retained scan and grouped by nearby {marker}. This discovered path is reveal-only."
+            )
+        },
+    );
+    DeepFinding {
+        title,
+        bytes: node.bytes(),
+        rebuild_cost,
+        counted: true,
+        project_root,
+        evidence: Evidence {
+            source_rec_id: None,
+            measured_path: node.path.clone(),
+            display_path: crate::rules::display(&node.path),
+            tier: None,
+            estimated: false,
+            command: None,
+            explanation,
+            recovery: if rebuild_cost == RebuildCost::QuickRegeneration {
+                "The owning build tool should regenerate this output; DiskDeck does not remove it from Developer Lens."
+                    .into()
+            } else if rebuild_cost == RebuildCost::LargeDownload {
+                "The owning project can recreate this environment, potentially with a large dependency download."
+                    .into()
+            } else {
+                "Ownership is ambiguous, so inspect it in Finder and preserve it unless you understand the project."
+                    .into()
+            },
+            overlap: None,
+        },
+    }
+}
+
+fn xcode_inventory_finding(
+    node: &Arc<Node>,
+    title: &str,
+    rebuild_cost: RebuildCost,
+    recovery: &str,
+) -> DeepFinding {
+    DeepFinding {
+        title: title.into(),
+        bytes: node.bytes(),
+        rebuild_cost,
+        counted: true,
+        project_root: None,
+        evidence: Evidence {
+            source_rec_id: None,
+            measured_path: node.path.clone(),
+            display_path: crate::rules::display(&node.path),
+            tier: None,
+            estimated: false,
+            command: None,
+            explanation:
+                "Measured at a fixed Xcode location in the retained scan; shown read-only unless a vetted rule exists."
+                    .into(),
+            recovery: recovery.into(),
+            overlap: None,
+        },
+    }
+}
+
+pub fn build_report_with_inventory<F>(
+    recs: &[Rec],
+    docker: DockerBreakdown,
+    root: &Arc<Node>,
+    home: &std::path::Path,
+    mut marker_exists: F,
+) -> DeveloperReport
+where
+    F: FnMut(&std::path::Path, &str) -> bool,
+{
+    let mut candidates = candidates_from_recs(recs);
+    let rec_paths: std::collections::BTreeSet<PathBuf> = candidates
+        .iter()
+        .map(|(_, finding)| finding.evidence.measured_path.clone())
+        .collect();
+    let fixed_xcode = [
+        (
+            home.join("Library/Developer/Xcode/DerivedData"),
+            "Xcode DerivedData",
+            RebuildCost::QuickRegeneration,
+            "Xcode rebuilds indexes and intermediates on the next project build.",
+        ),
+        (
+            home.join("Library/Developer/Xcode/Archives"),
+            "Xcode Archives",
+            RebuildCost::ManualSetup,
+            "Archives may be required for symbolication or distribution; keep them unless reviewed.",
+        ),
+        (
+            home.join("Library/Developer/Xcode/iOS DeviceSupport"),
+            "iOS Device Support",
+            RebuildCost::LargeDownload,
+            "Xcode recopies support data when the matching device reconnects.",
+        ),
+        (
+            home.join("Library/Developer/CoreSimulator/Profiles/Runtimes"),
+            "Simulator runtimes",
+            RebuildCost::LargeDownload,
+            "Simulator runtimes require a large Xcode download to restore.",
+        ),
+        (
+            home.join("Library/Developer/CoreSimulator/Devices"),
+            "Simulator devices",
+            RebuildCost::ManualSetup,
+            "Simulator devices may contain app state and remain review-only without a vetted rule.",
+        ),
+    ];
+
+    let mut project_nodes = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(node) = stack.pop() {
+        for child in node.kids() {
+            stack.push(child);
+        }
+        if !node.is_dir || node.bytes() <= 0 {
+            continue;
+        }
+        if !rec_paths.contains(&node.path) {
+            if let Some((_, title, cost, recovery)) = fixed_xcode
+                .iter()
+                .find(|(path, _, _, _)| *path == node.path)
+            {
+                candidates.push((
+                    DeveloperSection::Xcode,
+                    xcode_inventory_finding(&node, title, *cost, recovery),
+                ));
+            }
+        }
+        if node.bytes() >= PROJECT_MIN_BYTES && is_project_candidate(&node.path, home, &node.name) {
+            project_nodes.push(node);
+        }
+    }
+
+    project_nodes.sort_by(|left, right| {
+        right
+            .bytes()
+            .cmp(&left.bytes())
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    project_nodes.truncate(PROJECT_CANDIDATE_CAP);
+    for node in project_nodes {
+        let Some(project) = node.path.parent() else {
+            continue;
+        };
+        let marker = project_markers(&node.name)
+            .iter()
+            .copied()
+            .find(|marker| marker_exists(project, marker));
+        let (section, project_root) = if marker.is_some() {
+            (DeveloperSection::Projects, Some(project.to_path_buf()))
+        } else {
+            (DeveloperSection::Ungrouped, None)
+        };
+        candidates.push((section, inventory_finding(&node, project_root, marker)));
+    }
+    assemble_report(candidates, docker)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -378,6 +634,8 @@ mod tests {
     use super::*;
     use crate::rules::{Action, Rec};
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
     fn rec(id: &str, bytes: i64, tier: Tier) -> Rec {
         Rec {
@@ -412,6 +670,201 @@ mod tests {
         value.command = command;
         value.estimate = estimate;
         value
+    }
+
+    fn test_root(path: &str) -> Arc<Node> {
+        Arc::new(Node {
+            name: PathBuf::from(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "root".into()),
+            path: PathBuf::from(path),
+            is_dir: true,
+            bytes: std::sync::atomic::AtomicI64::new(0),
+            files: std::sync::atomic::AtomicI64::new(0),
+            small_bytes: std::sync::atomic::AtomicI64::new(0),
+            small_count: std::sync::atomic::AtomicI64::new(0),
+            denied: AtomicBool::new(false),
+            parent: std::sync::Weak::new(),
+            children: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn test_dir(parent: &Arc<Node>, path: &str, bytes: i64) -> Arc<Node> {
+        let path = PathBuf::from(path);
+        let child = Arc::new(Node {
+            name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            path,
+            is_dir: true,
+            bytes: std::sync::atomic::AtomicI64::new(bytes),
+            files: std::sync::atomic::AtomicI64::new(1),
+            small_bytes: std::sync::atomic::AtomicI64::new(0),
+            small_count: std::sync::atomic::AtomicI64::new(0),
+            denied: AtomicBool::new(false),
+            parent: Arc::downgrade(parent),
+            children: std::sync::Mutex::new(Vec::new()),
+        });
+        parent.children.lock().unwrap().push(child.clone());
+        child
+    }
+
+    #[test]
+    fn bounded_inventory_groups_owned_projects_and_keeps_ambiguity_read_only() {
+        const MB: i64 = 1_000_000;
+        let root = test_root("/data");
+        test_dir(&root, "/data/home/rust/target", 100 * MB);
+        test_dir(&root, "/data/home/python/.venv", 80 * MB);
+        test_dir(&root, "/data/home/js/dist", 60 * MB);
+        test_dir(&root, "/data/home/ambiguous/build", 50 * MB);
+        test_dir(&root, "/data/home/Library/Bad/target", 500 * MB);
+        test_dir(&root, "/data/home/small/target", 10 * MB);
+        test_dir(&root, "/outside/project/target", 400 * MB);
+
+        let report = build_report_with_inventory(
+            &[rec_at(
+                "nm-1",
+                "/data/home/js/node_modules",
+                120 * MB,
+                Tier::Caution,
+                None,
+                false,
+            )],
+            DockerBreakdown::default(),
+            &root,
+            std::path::Path::new("/data/home"),
+            |project, marker| {
+                matches!(
+                    (project.to_string_lossy().as_ref(), marker),
+                    ("/data/home/rust", "Cargo.toml")
+                        | ("/data/home/python", "pyproject.toml")
+                        | ("/data/home/js", "package.json")
+                )
+            },
+        );
+
+        let projects = report
+            .sections
+            .iter()
+            .find(|section| section.section == DeveloperSection::Projects)
+            .unwrap();
+        let project_paths: Vec<&str> = projects
+            .findings
+            .iter()
+            .map(|finding| finding.evidence.measured_path.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            project_paths,
+            vec![
+                "/data/home/js/node_modules",
+                "/data/home/rust/target",
+                "/data/home/python/.venv",
+                "/data/home/js/dist",
+            ]
+        );
+        assert!(projects
+            .findings
+            .iter()
+            .all(|finding| finding.project_root.is_some()));
+
+        let ungrouped = report
+            .sections
+            .iter()
+            .find(|section| section.section == DeveloperSection::Ungrouped)
+            .unwrap();
+        assert_eq!(ungrouped.findings.len(), 1);
+        assert_eq!(ungrouped.findings[0].rebuild_cost, RebuildCost::ManualSetup);
+        assert_eq!(ungrouped.findings[0].evidence.tier, None);
+        assert_eq!(ungrouped.findings[0].evidence.command, None);
+        assert_eq!(ungrouped.findings[0].project_root, None);
+    }
+
+    #[test]
+    fn inventory_caps_marker_probes_and_is_deterministic() {
+        const MB: i64 = 1_000_000;
+        let root = test_root("/data");
+        for index in (0..250).rev() {
+            test_dir(
+                &root,
+                &format!("/data/home/project-{index:03}/target"),
+                (30 + index) * MB,
+            );
+        }
+        let calls = std::cell::Cell::new(0_usize);
+        let report = build_report_with_inventory(
+            &[],
+            DockerBreakdown::default(),
+            &root,
+            std::path::Path::new("/data/home"),
+            |_, marker| {
+                calls.set(calls.get() + 1);
+                marker == "Cargo.toml"
+            },
+        );
+        assert!(calls.get() <= 1_000);
+        let projects = report
+            .sections
+            .iter()
+            .find(|section| section.section == DeveloperSection::Projects)
+            .unwrap();
+        assert_eq!(projects.findings.len(), 200);
+        assert_eq!(
+            projects.findings[0].evidence.measured_path,
+            PathBuf::from("/data/home/project-249/target")
+        );
+        assert_eq!(
+            projects.findings.last().unwrap().evidence.measured_path,
+            PathBuf::from("/data/home/project-050/target")
+        );
+    }
+
+    #[test]
+    fn fixed_xcode_inventory_prefers_existing_rule_evidence() {
+        const MB: i64 = 1_000_000;
+        let root = test_root("/data");
+        test_dir(
+            &root,
+            "/data/home/Library/Developer/CoreSimulator/Profiles/Runtimes",
+            900 * MB,
+        );
+        test_dir(
+            &root,
+            "/data/home/Library/Developer/CoreSimulator/Devices",
+            700 * MB,
+        );
+        let report = build_report_with_inventory(
+            &[rec_at(
+                "sim-unavailable",
+                "/data/home/Library/Developer/CoreSimulator/Devices",
+                700 * MB,
+                Tier::Safe,
+                Some("xcrun simctl delete unavailable"),
+                true,
+            )],
+            DockerBreakdown::default(),
+            &root,
+            std::path::Path::new("/data/home"),
+            |_, _| false,
+        );
+        let xcode = report
+            .sections
+            .iter()
+            .find(|section| section.section == DeveloperSection::Xcode)
+            .unwrap();
+        assert_eq!(xcode.findings.len(), 2);
+        let devices = xcode
+            .findings
+            .iter()
+            .find(|finding| finding.evidence.measured_path.ends_with("Devices"))
+            .unwrap();
+        assert_eq!(
+            devices.evidence.source_rec_id.as_deref(),
+            Some("sim-unavailable")
+        );
+        assert!(devices.evidence.estimated);
+        assert_eq!(
+            devices.evidence.command,
+            Some("xcrun simctl delete unavailable")
+        );
     }
 
     #[test]
